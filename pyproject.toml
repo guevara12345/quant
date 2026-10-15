@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant"
+version = "0.1.0"
+description = "A 股量化研究原型：日频回测"
+requires-python = ">=3.11"
+
+[project.scripts]
+backtest = "quant.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["network: 需要联网的冒烟测试，默认跳过（用 --run-network 启用）"]
+
+[[tool.mypy.overrides]]
+module = ["baostock"]
+ignore_missing_imports = true

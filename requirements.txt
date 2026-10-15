@@ -1,0 +1,10 @@
+baostock
+pandas
+numpy
+scipy
+pyarrow
+matplotlib
+pytest
+mypy
+pandas-stubs
+-e .
