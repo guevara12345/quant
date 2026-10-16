@@ -13,7 +13,8 @@ import pandas as pd  # noqa: E402
 
 from quant.engine import BacktestResult  # noqa: E402
 
-plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "PingFang SC", "Noto Sans CJK SC", "DejaVu Sans"]
+plt.rcParams["font.sans-serif"] = ["Microsoft YaHei",
+                                   "SimHei", "PingFang SC", "Noto Sans CJK SC", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 
 METRIC_LABELS = {
@@ -45,9 +46,11 @@ def format_metrics(metrics: dict) -> str:
 
 def write_report(out_dir: Path, title: str, result: BacktestResult, benchmark: pd.Series, metrics: dict) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    result.fills.to_csv(out_dir / "fills.csv", index=False, encoding="utf-8-sig")
+    result.fills.to_csv(out_dir / "fills.csv",
+                        index=False, encoding="utf-8-sig")
     daily = result.daily.copy()
-    daily["positions"] = daily["positions"].map(lambda p: json.dumps(p, ensure_ascii=False))
+    daily["positions"] = daily["positions"].map(
+        lambda p: json.dumps(p, ensure_ascii=False))
     daily["benchmark_nav"] = daily["date"].map(benchmark)
     daily.to_csv(out_dir / "daily.csv", index=False, encoding="utf-8-sig")
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False, default=float),
@@ -56,7 +59,8 @@ def write_report(out_dir: Path, title: str, result: BacktestResult, benchmark: p
     nav = result.daily.set_index("date")["nav"]
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(pd.to_datetime(nav.index), nav / nav.iloc[0], label="策略")
-    ax.plot(pd.to_datetime(benchmark.index), benchmark / benchmark.iloc[0], label="买入持有", alpha=0.7)
+    ax.plot(pd.to_datetime(benchmark.index), benchmark /
+            benchmark.iloc[0], label="买入持有", alpha=0.7)
     ax.set_title(title)
     ax.set_ylabel("净值")
     ax.grid(alpha=0.3)

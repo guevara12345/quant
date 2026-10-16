@@ -13,13 +13,16 @@ from quant.strategy import Side
 TRADING_DAYS_PER_YEAR = 252
 
 
-def buy_and_hold_nav(feed: DataFeed, symbol: str, days: list, initial_cash: float) -> pd.Series:
+def buy_and_hold_nav(
+        feed: DataFeed, symbol: str, days: list, initial_cash: float) -> pd.Series:
     """基准：首日按后复权收盘价全额持有到最后一日，不计费用。"""
-    prices = pd.Series({d: bar.adj_close for d in days if (bar := feed.bar(symbol, d)) is not None})
+    prices = pd.Series({d: bar.adj_close for d in days if (
+        bar := feed.bar(symbol, d)) is not None})
     return initial_cash * prices / prices.iloc[0]
 
 
-def compute_metrics(result: BacktestResult, feed: DataFeed, symbol: str, risk_free_rate: float = 0.015) -> dict:
+def compute_metrics(
+        result: BacktestResult, feed: DataFeed, symbol: str, risk_free_rate: float = 0.015) -> dict:
     nav = result.daily.set_index("date")["nav"]
     initial = nav.iloc[0]
     benchmark = buy_and_hold_nav(feed, symbol, list(nav.index), initial)
@@ -42,7 +45,8 @@ def compute_metrics(result: BacktestResult, feed: DataFeed, symbol: str, risk_fr
         "benchmark_total_return": benchmark.iloc[-1] / benchmark.iloc[0] - 1,
         "benchmark_annual_return": _annualize(benchmark, years),
     }
-    metrics["excess_annual_return"] = metrics["annual_return"] - metrics["benchmark_annual_return"]
+    metrics["excess_annual_return"] = metrics["annual_return"] - \
+        metrics["benchmark_annual_return"]
     return metrics
 
 
@@ -70,7 +74,8 @@ def _round_trip_wins(fills: pd.DataFrame) -> tuple[int, int]:
     cost: dict[str, float] = {}
     wins = trades = 0
     for f in fills.to_dict("records"):
-        symbol, qty, amount, fee = f["symbol"], int(f["quantity"]), f["quantity"] * f["price"], f["fee"]
+        symbol, qty, amount, fee = f["symbol"], int(
+            f["quantity"]), f["quantity"] * f["price"], f["fee"]
         held = quantity.get(symbol, 0)
         if f["side"] == Side.BUY.value:
             quantity[symbol] = held + qty

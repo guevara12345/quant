@@ -17,7 +17,8 @@ class MaCross(Strategy):
         if len(prices) < self.slow + 1:
             return []
         today = _mean(prices[-self.fast:]) - _mean(prices[-self.slow:])
-        yesterday = _mean(prices[-self.fast - 1:-1]) - _mean(prices[-self.slow - 1:-1])
+        yesterday = _mean(prices[-self.fast - 1:-1]) - \
+            _mean(prices[-self.slow - 1:-1])
         held = ctx.positions.get(ctx.symbol, 0)
         if yesterday <= 0 < today and held == 0:
             return [Order(ctx.symbol, Side.BUY)]

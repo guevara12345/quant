@@ -35,7 +35,8 @@ class ParquetCache:
         """返回 [start, end] 内的数据；缓存未覆盖的区间调用 fetch 补拉。补拉失败时若已有缓存则降级使用缓存。"""
         cached = self._read(key)
         coverage = self._coverage().get(key)
-        missing = [(a, b) for a, b in _missing_ranges(start, end, coverage) if a <= self.published_through]
+        missing = [(a, b) for a, b in _missing_ranges(
+            start, end, coverage) if a <= self.published_through]
         if missing:
             try:
                 fetched = [fetch(a, b) for a, b in missing]
@@ -44,13 +45,16 @@ class ParquetCache:
                     raise
                 log.warning("补拉 %s %s 失败（%s），使用本地缓存", key, missing, exc)
             else:
-                frames = [f for f in [cached, *fetched] if f is not None and not f.empty]
+                frames = [f for f in [cached, *fetched]
+                          if f is not None and not f.empty]
                 merged = (pd.concat(frames).drop_duplicates("date", keep="last").sort_values("date")
                           if frames else pd.DataFrame(columns=["date"]))
                 self._write(key, merged)
-                lo = min(start, date.fromisoformat(coverage[0])) if coverage else start
+                lo = min(start, date.fromisoformat(
+                    coverage[0])) if coverage else start
                 hi = min(end, self.published_through)
-                hi = max(hi, date.fromisoformat(coverage[1])) if coverage else hi
+                hi = max(hi, date.fromisoformat(
+                    coverage[1])) if coverage else hi
                 self._set_coverage(key, lo, hi)
                 cached = merged
         if cached is None:
@@ -79,7 +83,8 @@ class ParquetCache:
     def _set_coverage(self, key: str, start: date, end: date) -> None:
         coverage = self._coverage()
         coverage[key] = [start.isoformat(), end.isoformat()]
-        self._coverage_file.write_text(json.dumps(coverage, indent=2, sort_keys=True), encoding="utf-8")
+        self._coverage_file.write_text(json.dumps(
+            coverage, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _missing_ranges(start: date, end: date, coverage: list[str] | None) -> list[tuple[date, date]]:

@@ -71,7 +71,8 @@ def run_backtest(
             pending.extend(strategy.on_bar(ctx))
 
         # 3. 记录当日快照
-        market_value = sum(q * last_close[s] for s, q in portfolio.positions.items())
+        market_value = sum(q * last_close[s]
+                           for s, q in portfolio.positions.items())
         rows.append({
             "date": day,
             "cash": portfolio.cash,
