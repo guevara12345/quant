@@ -188,3 +188,30 @@ def test_every_unfilled_order_has_a_reason_including_odd_lot_and_no_position():
         {"date": D2, "side": "buy", "reason": "不足整手"},
         {"date": D2, "side": "sell", "reason": "无持仓"},
     ]
+
+
+def test_ex_rights_day_fills_at_unadjusted_open_and_rounds_lots_on_unadjusted_price():
+    # 第 2 日除权（每 10 股送 10 股，因子 1 → 2）：不复权开盘 5，后复权开盘 10
+    # 满仓买入按不复权价 5 计：100,000 / 5 = 20,000 股（若按后复权价只有 10,000 股）
+    feed = make_feed(SYMBOL, {D1: (10, 10), D2: make_bar(5, 5, adj_factor=2.0)})
+    result = run_backtest(feed, Script({1: [Order(SYMBOL, Side.BUY)]}), symbol=SYMBOL,
+                          start=D1, end=D2, config=NO_COSTS)
+    assert result.fills[["date", "quantity", "price"]].to_dict("records") == [
+        {"date": D2, "quantity": 20_000, "price": 5.0}]
+
+
+@pytest.mark.parametrize("open_price, side, filled", [
+    (5.5, Side.BUY, False),  # 除权参考价 5 × 1.1 = 5.5，涨停买不进（按未除权的前收盘 10 算会成交）
+    (5.49, Side.BUY, True),
+    (4.5, Side.SELL, False),  # 5 × 0.9 = 4.5，跌停卖不出
+    (4.51, Side.SELL, True),
+])
+def test_ex_rights_day_price_limits_use_ex_rights_reference_price(open_price, side, filled):
+    # 前收盘 10，第 3 日除权（因子 1 → 2），除权参考价 = 10 × 1 / 2 = 5，仍是不复权价口径
+    feed = make_feed(SYMBOL, {
+        D1: (10, 10), D2: (10, 10), D3: make_bar(open_price, open_price, adj_factor=2.0)})
+    orders = {1: [Order(SYMBOL, Side.BUY, 1000)]} if side is Side.SELL else {}
+    orders[2] = [Order(SYMBOL, side, 1000)]
+    result = run_backtest(feed, Script(orders), symbol=SYMBOL,
+                          start=D1, end=D3, config=NO_COSTS)
+    assert (D3 in set(result.fills["date"])) is filled

@@ -1,6 +1,6 @@
 # 代码导读：A 股量化研究原型
 
-> **适用范围**：ticket 01（骨架 + 双均线）、02（A 股撮合规则）落地后的代码。
+> **适用范围**：ticket 01（骨架 + 双均线）、02（A 股撮合规则）、03（除权处理）落地后的代码。
 > **配套文档**：目标设计与演进路线见 [`design.md`](design.md)；术语以 [`GLOSSARY.md`](../GLOSSARY.md) 为准；决策见 [`docs/adr/`](adr/)。
 > 本文配合图表，逐个文件、逐个函数讲清楚**现有代码**怎么运转。代码演进后，请同步更新行号和「容易忽略的细节」一节。
 >
@@ -51,9 +51,9 @@ flowchart LR
 | --- | --- | --- | --- |
 | 1 | [`data/feed.py`](../src/quant/data/feed.py) | `Bar` 有哪些字段、`DataFeed` 协议只有两个方法 | 3 分钟 |
 | 2 | [`strategy.py`](../src/quant/strategy.py) | `Order` / `Context` / `Strategy`，策略能看到什么 | 3 分钟 |
-| 3 | [`portfolio.py`](../src/quant/portfolio.py) | `Fill` 怎么改变现金和持仓、`Rejection` 记录什么、可卖数量 | 3 分钟 |
-| 4 | [`instruments/stock.py`](../src/quant/instruments/stock.py) | 订单如何变成成交或被拒（A 股规则） | 10 分钟 |
-| 5 | [`engine.py`](../src/quant/engine.py) | **核心**：每日循环的四个步骤 | 10 分钟 |
+| 3 | [`portfolio.py`](../src/quant/portfolio.py) | `Fill` 怎么改变现金和持仓、`Rejection` 记录什么、可卖数量、除权改写持股 | 3 分钟 |
+| 4 | [`instruments/stock.py`](../src/quant/instruments/stock.py) | 订单如何变成成交或被拒（A 股规则）、除权日的持股与涨跌停基准 | 10 分钟 |
+| 5 | [`engine.py`](../src/quant/engine.py) | **核心**：每日循环的五个步骤 | 10 分钟 |
 | 6 | [`strategies/ma_cross.py`](../src/quant/strategies/ma_cross.py) | 一个具体策略 | 3 分钟 |
 | 7 | [`tests/test_engine.py`](../tests/test_engine.py)、[`tests/test_stock_rules.py`](../tests/test_stock_rules.py) | 用测试反向理解引擎语义与撮合规则 | 15 分钟 |
 | 8 | [`data/cache.py`](../src/quant/data/cache.py) | 缓存覆盖区间算法 | 10 分钟 |
@@ -249,6 +249,7 @@ classDiagram
         -dict _bought_today  T+1
         +sellable(symbol, day) int
         +apply(fill)
+        +adjust_position(symbol, quantity)
         +accrue_interest(rate, days)
     }
 
@@ -271,6 +272,7 @@ classDiagram
         +StockConfig config
         +limit_ratio(symbol, day, is_st) float
         +fee(side, amount) float
+        +apply_ex_rights(symbol, ratio, prev_close, portfolio) float
         +match_at_open(order, day, bar, prev_close, portfolio) Fill|Rejection
         -_round_lot(quantity) int
         -_max_affordable(price, cash) int
@@ -308,9 +310,9 @@ classDiagram
 
 几个设计要点：
 
-- **几乎全是不可变值对象**（`frozen=True`）：`Bar`、`Order`、`Fill`、`Rejection`、`Context`、所有 `Config`。唯一可变的状态是 `Portfolio`，而它只在引擎里被修改。读代码时只要盯住 `portfolio.apply(...)` 和 `portfolio.accrue_interest(...)` 两处调用，就知道钱是怎么变的。
+- **几乎全是不可变值对象**（`frozen=True`）：`Bar`、`Order`、`Fill`、`Rejection`、`Context`、所有 `Config`。唯一可变的状态是 `Portfolio`，而它只在引擎里被修改。读代码时只要盯住 `portfolio.apply(...)`、`portfolio.adjust_position(...)`（除权）和 `portfolio.accrue_interest(...)` 三处调用，就知道钱和股数是怎么变的。
 - **`Order.quantity` 为 `None` 有特殊语义**：买入表示满仓，卖出表示全部卖出。具体股数要到成交日开盘、知道开盘价后才能算，所以推迟到 `StockRules.match_at_open` 决定。给出数量时必须为正数，否则构造 `Order` 就抛 `ValueError`。
-- **`Context` 给策略的是快照副本**：`history=list(history)`、`positions=dict(portfolio.positions)`，策略即使修改也不会影响引擎（[engine.py:75](../src/quant/engine.py#L75)）。
+- **`Context` 给策略的是快照副本**：`history=list(history)`、`positions=dict(portfolio.positions)`，策略即使修改也不会影响引擎（[engine.py:85](../src/quant/engine.py#L85)）。
 
 ## 5. 一次回测的完整调用链
 
@@ -380,7 +382,7 @@ sequenceDiagram
 
 ### 5.3 阶段 ③ 回测：一个交易日内发生了什么
 
-`run_backtest` 对每个交易日重复同样的四步，这里只画**一天**：
+`run_backtest` 对每个交易日重复同样的五步，这里只画**一天**：
 
 ```mermaid
 sequenceDiagram
@@ -390,7 +392,12 @@ sequenceDiagram
     participant ST as MaCross
 
     E->>P: ⓪ accrue_interest(rate, 距上一交易日的自然日数)
-    loop ① pending 中每个订单（上一交易日收盘产生）
+    opt ① 复权因子较上一个有 bar 的交易日变化（除权日）
+        E->>R: apply_ex_rights(symbol, 当日因子 / 前一日因子, 前收盘价, portfolio)
+        R->>P: adjust_position(symbol, 新股数)
+        R-->>E: 除权参考价，写回 last_close 作为当日涨跌停基准
+    end
+    loop ② pending 中每个订单（上一交易日收盘产生）
         E->>R: match_at_open(order, day, bar, 前收盘价, portfolio)
         R-->>E: Fill 或 Rejection
         alt Fill
@@ -399,15 +406,16 @@ sequenceDiagram
             E->>E: 记入 rejections（订单不再保留）
         end
     end
-    E->>ST: ② on_bar(Context 快照)
+    E->>ST: ③ on_bar(Context 快照)
     ST-->>E: list[Order]，放入 pending，下一交易日开盘撮合
-    E->>E: ③ 记录快照 cash / market_value / nav / positions
+    E->>E: ④ 记录快照 cash / market_value / nav / positions
 ```
 
 注意三点：
 
 - 策略**不直接**调用 `StockRules` 或 `Portfolio`，它只返回订单；改变账户的只有引擎。
-- 今天 ② 产生的订单，要到**下一个交易日**的 ① 才撮合，这就是「信号日收盘、成交日开盘」。
+- 今天 ③ 产生的订单，要到**下一个交易日**的 ② 才撮合，这就是「信号日收盘、成交日开盘」。
+- 除权调整在开盘撮合**之前**：除权日开盘卖出时，卖的已是放大后的持股。
 - 所有交易日跑完后，`rows`、`fills`、`rejections` 三个列表转成 DataFrame，包成 `BacktestResult(daily, fills, rejections)` 返回。
 
 ### 5.4 阶段 ④ 输出
@@ -447,10 +455,10 @@ flowchart LR
     end
     U --> M1["撮合成交价<br/>StockRules.match_at_open"]
     U --> M2["持仓市值<br/>engine 快照 last_close"]
-    U --> M3["涨跌停价<br/>上一交易日 close × (1 ± 板块限幅)"]
+    U --> M3["涨跌停价<br/>上一交易日 close（除权日为除权参考价）× (1 ± 板块限幅)"]
     A --> S1["均线信号<br/>MaCross"]
     A --> S2["买入持有基准<br/>buy_and_hold_nav"]
-    F --> T1["除权日调整持股数（目标 03）"]
+    F --> T1["除权日按 当日因子 / 前一日因子<br/>放大持股数、推算除权参考价"]
     X --> T2["停牌不成交、主板 ST 5% 涨跌幅"]
 ```
 
@@ -537,7 +545,8 @@ data_cache/baostock/
 | `portfolio` | `Portfolio` | 唯一可变的账户状态 |
 | `rules` | `StockRules` | 撮合规则（目前写死为股票） |
 | `history` | `list[(date, Bar)]` | 截至当日的全部 bar，传给策略 |
-| `last_close` | `dict[symbol, float]` | 每个标的最近一个不复权收盘价，用于估值；开盘撮合时它还是上一交易日的值，即计算涨跌停价用的前收盘价 |
+| `last_close` | `dict[symbol, float]` | 每个标的最近一个不复权收盘价，用于估值；开盘撮合时它还是上一交易日的值（除权日已换成除权参考价），即计算涨跌停价用的基准 |
+| `last_factor` | `dict[symbol, float]` | 每个标的最近一个有 bar 的交易日的复权因子，与当日因子不同即为除权日 |
 | `pending` | `list[Order]` | 信号日产生、等待下一交易日开盘撮合的订单 |
 | `fills` | `list[Fill]` | 全部成交 |
 | `rejections` | `list[Rejection]` | 全部未成交订单及原因 |
@@ -555,16 +564,20 @@ flowchart TD
     Int --> SetPrev["prev_day = day"]
     SetPrev --> HasBar{"bar 不为 None?"}
     HasBar -- 否 --> Snap
-    HasBar -- 是 --> S1["<b>步骤 1 开盘撮合</b><br/>for order in pending:<br/>  outcome = rules.match_at_open(..., last_close.get(symbol), ...)<br/>  Fill → portfolio.apply；Rejection → rejections"]
-    S1 --> Clear["pending = []<br/>history.append((day, bar))<br/>last_close[symbol] = bar.close"]
-    Clear --> S2["<b>步骤 2 收盘调用策略</b><br/>ctx = Context(快照副本)<br/>pending.extend(strategy.on_bar(ctx))"]
-    S2 --> Snap["<b>步骤 3 记录快照</b><br/>market_value = Σ 持股 × last_close<br/>nav = cash + market_value"]
+    HasBar -- 是 --> X{"adj_factor ≠ last_factor[symbol]?"}
+    X -- 是 --> S1["<b>步骤 1 除权</b><br/>last_close[symbol] = rules.apply_ex_rights(<br/>  symbol, 当日因子 / 前一日因子, last_close[symbol], portfolio)"]
+    X -- 否（或第一个 bar） --> SetF
+    S1 --> SetF["last_factor[symbol] = bar.adj_factor"]
+    SetF --> S2["<b>步骤 2 开盘撮合</b><br/>for order in pending:<br/>  outcome = rules.match_at_open(..., last_close.get(symbol), ...)<br/>  Fill → portfolio.apply；Rejection → rejections"]
+    S2 --> Clear["pending = []<br/>history.append((day, bar))<br/>last_close[symbol] = bar.close"]
+    Clear --> S3["<b>步骤 3 收盘调用策略</b><br/>ctx = Context(快照副本)<br/>pending.extend(strategy.on_bar(ctx))"]
+    S3 --> Snap["<b>步骤 4 记录快照</b><br/>market_value = Σ 持股 × last_close<br/>nav = cash + market_value"]
     Snap --> Next{还有交易日?}
     Next -- 是 --> Start
     Next -- 否 --> Out(["BacktestResult(daily, fills, rejections)"])
 ```
 
-源码中四个步骤都有编号注释：[步骤 0](../src/quant/engine.py#L54)、[步骤 1](../src/quant/engine.py#L59)、[步骤 2](../src/quant/engine.py#L73)、[步骤 3](../src/quant/engine.py#L79)。
+源码中五个步骤都有编号注释：[步骤 0](../src/quant/engine.py#L55)、[步骤 1](../src/quant/engine.py#L60)、[步骤 2](../src/quant/engine.py#L69)、[步骤 3](../src/quant/engine.py#L83)、[步骤 4](../src/quant/engine.py#L89)。
 
 ### 7.2 一天之内的时间轴
 
@@ -579,8 +592,8 @@ flowchart LR
         I["现金闲置<br/>按自然日数计息（步骤 0）"]
     end
     subgraph T1["交易日 T（成交日）"]
-        O1["09:30 开盘<br/>撮合 pending（步骤 1）"]
-        C1["15:00 收盘<br/>策略再次决策（步骤 2）<br/>按收盘价估值（步骤 3）"]
+        O1["09:30 开盘前<br/>除权调整持股（步骤 1）<br/>09:30 开盘<br/>撮合 pending（步骤 2）"]
+        C1["15:00 收盘<br/>策略再次决策（步骤 3）<br/>按收盘价估值（步骤 4）"]
         O1 --> C1
     end
     C0 --> I --> O1
@@ -607,7 +620,7 @@ stateDiagram-v2
 
 ### 8.1 `StockRules.match_at_open`
 
-[`stock.py:64`](../src/quant/instruments/stock.py#L64)。每个订单要么变成 `Fill`，要么变成带原因的 `Rejection`，不会静默消失。
+[`stock.py:76`](../src/quant/instruments/stock.py#L76)。每个订单要么变成 `Fill`，要么变成带原因的 `Rejection`，不会静默消失。
 
 ```mermaid
 flowchart TD
@@ -641,7 +654,7 @@ flowchart TD
     SQ --> F(["Fill(day, symbol, side, quantity, price,<br/>fee = fee(side, quantity × price))"])
 ```
 
-`prev_close` 为 `None` 只发生在回测区间第一个有 bar 的交易日之前没有收盘价时，此时不检查涨跌停。
+`prev_close` 为 `None` 只发生在回测区间第一个有 bar 的交易日之前没有收盘价时，此时不检查涨跌停。除权日引擎传入的是除权参考价（见下文「除权」）。
 
 **涨跌幅**（[`limit_ratio`](../src/quant/instruments/stock.py#L44)）按代码前缀判断板块：
 
@@ -651,15 +664,21 @@ flowchart TD
 | 创业板，成交日 ≥ `chinext_reform_date`（2020-08-24） | `300` / `301` | 20% | 20%（与板块相同） |
 | 改革前的创业板、主板 | 其余 | 10% | 5% |
 
-涨跌停价（[`limit_price`](../src/quant/instruments/stock.py#L117)）用 `Decimal` 计算并四舍五入到分，避免 `9.5 × 1.1 = 10.450000000000001` 这类浮点误差让「开盘等于涨停价」判断失效。判断用 `≥` / `≤`，与「等于」等价（开盘价不会越过涨跌停价）。
+涨跌停价（[`limit_price`](../src/quant/instruments/stock.py#L129)）用 `Decimal` 计算并四舍五入到分，避免 `9.5 × 1.1 = 10.450000000000001` 这类浮点误差让「开盘等于涨停价」判断失效。判断用 `≥` / `≤`，与「等于」等价（开盘价不会越过涨跌停价）。
 
 **费用**（[`fee`](../src/quant/instruments/stock.py#L53)）：`max(成交额 × 佣金率, 最低佣金) + 成交额 × 过户费率`，卖出再加 `成交额 × 印花税率`。成交额按含滑点的成交价计算。
 
-**满仓买入的股数**（[`_max_affordable`](../src/quant/instruments/stock.py#L108)）：先取不计费用时能买的整手上限 `_round_lot(floor(cash / price))`，再逐手递减，直到 `成交额 + fee ≤ cash`。费用只在 `fee()` 一处计算，新增费用项不用改这里。
+**满仓买入的股数**（[`_max_affordable`](../src/quant/instruments/stock.py#L120)）：先取不计费用时能买的整手上限 `_round_lot(floor(cash / price))`，再逐手递减，直到 `成交额 + fee ≤ cash`。费用只在 `fee()` 一处计算，新增费用项不用改这里。
 
 例：现金 100,000、价格 10、只收万 2.5 佣金 → 上限 10,000 股需要 100,025，超出现金；退到 9,900 股，99,000 + 24.75 ≤ 100,000。见测试 [`test_full_position_buy_takes_as_many_whole_lots_as_cash_and_commission_allow`](../tests/test_engine.py#L91)。
 
 **T+1 的可卖数量**（[`Portfolio.sellable`](../src/quant/portfolio.py#L55)）：`Portfolio` 记住最近一个有买入成交的日期及当日各标的买入股数，可卖数量 = 持股 − 当日买入（查询日期不是那一天时，当日买入视为 0）。这样引擎不必每天通知账户「新的一天」。
+
+**除权**（[`apply_ex_rights`](../src/quant/instruments/stock.py#L64)）：后复权因子只在除权日跳变，引擎发现因子变化就把 `ratio = 当日因子 / 前一日因子` 交给品种规则，它就是一股变成几股的比例（送转是真实的股数变化，现金分红则近似为按除权价再投资）。
+
+- 持股数 = `round(持股 × ratio)`，取最近的整股、不要求整手，由 [`Portfolio.adjust_position`](../src/quant/portfolio.py#L75) 写回，不产生成交、不动现金。例：每 10 股送 1 股，因子 1.0 → 1.1，1000 股 → 1100 股，不复权价 11 → 10，市值不变。
+- 返回除权参考价 = `前收盘价 / ratio`，四舍五入到分，引擎把它写回 `last_close`，当日涨跌停以它为基准。例：前收盘 10、因子 1 → 2，参考价 5，主板涨停价 5.5（若仍按 10 算是 11，判断会偏松）。
+- 撮合价、整手、涨跌停全部仍是不复权价口径；后复权价只给信号和基准用。
 
 ### 8.2 `Portfolio.apply`：钱和股票怎么变
 
@@ -819,9 +838,9 @@ flowchart LR
     E --> RES["BacktestResult<br/>只断言 fills / rejections / daily"]
 ```
 
-- [`make_bar`](../tests/conftest.py#L22)：给开盘价、收盘价即可，其余字段自动补齐（`high/low` 取二者极值、`adj_close = close`、`adj_factor = 1`）；`suspended`、`is_st` 可选，默认非停牌非 ST。
+- [`make_bar`](../tests/conftest.py#L22)：给开盘价、收盘价即可，其余字段自动补齐（`high/low` 取二者极值、`adj_factor` 默认 1、`adj_close = close × adj_factor`）；给出 `adj_factor` 即可构造除权日；`suspended`、`is_st` 可选，默认非停牌非 ST。
 - [`stock_costs`](../tests/conftest.py#L38)：佣金、印花税、过户费、滑点全为 0 的 `StockConfig`，只打开需要的项，让金额可手算。
-- [`make_feed`](../tests/conftest.py#L45)：字典的键就是交易日历，故意漏掉某天就等于该日休市；值可以是 `(开盘, 收盘)`，也可以是 `make_bar(...)` 构造的停牌、ST bar。
+- [`make_feed`](../tests/conftest.py#L45)：字典的键就是交易日历，故意漏掉某天就等于该日休市；值可以是 `(开盘, 收盘)`，也可以是 `make_bar(...)` 构造的停牌、ST、除权日 bar。
 - 测试中的策略都是几行的「脚本策略」（如 `BuyOnceOnFirstDay`、`BuyThenSellAll`、`test_stock_rules.py` 的 `Script`），按 `len(ctx.history)` 决定第几天下单，让场景可手算。
 - 联网测试打 `@pytest.mark.network`，默认跳过，`pytest --run-network` 启用。
 
@@ -836,9 +855,13 @@ flowchart LR
 | `test_small_trade_pays_minimum_commission` | 5 元最低佣金 |
 | `test_sell_without_quantity_closes_whole_position_at_next_open` | 全部卖出语义 |
 | `test_interest_for_the_gap_accrues_on_previous_close_cash_before_open_fills` | 计息先于开盘撮合 |
+| `test_position_scales_by_factor_ratio_on_ex_rights_day_so_nav_does_not_drop` | 除权日持股按因子比例放大，净值不跳水 |
+| `test_ex_rights_adjusted_position_rounds_to_whole_shares_and_can_all_be_sold` | 除权后取整到整股，零股可全部卖出 |
 | `test_golden_cross_buys_and_death_cross_sells_on_next_day_open` | 双均线交叉与成交时点 |
+| `test_ex_rights_gap_does_not_trigger_death_cross_because_signal_uses_adjusted_price` | 除权缺口不产生假死叉（信号用后复权价） |
 | `test_metrics_and_buy_and_hold_benchmark` | 各项指标手算校验 |
-| `test_stock_rules.py` 各测试 | T+1、整手、开盘涨跌停跳过、各板块 / ST / 创业板改革日的涨跌幅、停牌、默认费率、滑点方向、资金不足拒单、每笔未成交都有原因 |
+| `test_stock_rules.py` 各测试 | T+1、整手、开盘涨跌停跳过、各板块 / ST / 创业板改革日的涨跌幅、停牌、默认费率、滑点方向、资金不足拒单、每笔未成交都有原因；除权日按不复权价撮合与取整、涨跌停以除权参考价为基准 |
+| `test_moutai_buy_and_hold_tracks_backward_adjusted_return_across_ex_rights_days`（联网） | 茅台 2016–2024 持有期市值涨幅与后复权价涨幅一致 |
 | `test_report_lists_skipped_orders_with_reasons` | `rejections.csv` 内容与终端汇总 |
 
 ## 13. 实例追踪：一次金叉死叉的逐日推演
@@ -879,11 +902,12 @@ sequenceDiagram
 1. **引擎目前是单标的**：`run_backtest(..., symbol=...)` 只取一个标的的 bar，`Context.symbol` 也只有一个。策略即使返回别的 symbol 的订单，也会用这个标的的 bar 撮合。这是 ticket 04 之前必须改的地方，目标形态见 [`design.md`](design.md) 中「从单标的到多标的」。
 2. **撮合规则写死为股票**：`rules = StockRules(config.stock)`，还没有按品种分派（ADR-0001 的目标形态）。
 3. **没有 bar 的交易日**：`feed.bar` 返回 `None` 时，不撮合、不调用策略，`pending` 保留到下一个有 bar 的日子；当日快照用 `last_close` 中的旧收盘价估值，并照常计息。
-4. **估值用不复权收盘价，基准用后复权价**：在 ticket 03 实现除权调整持股数之前，持仓跨除权日时策略净值会因为除权缺口下跌，而基准不会，两者会出现系统性偏差。
+4. **估值用不复权收盘价，基准用后复权价**：两者能对上，靠的是除权日按因子比例放大持股数。这是分红再投资的近似：不计红利税、取整到整股；且基准从首日收盘起算，策略要到次日开盘才买入、还剩不足整手的现金，所以净值与基准不会完全重合。
 5. **被拒的订单不顺延**：记一条 `Rejection` 后订单就结束了，不会挂到下一交易日再试。双均线只在交叉当天发信号，所以开盘涨停没买到的那次金叉就错过了，这符合「次日开盘一次性撮合」的设定。
 6. **卖出数量超过可卖数量时部分成交**：只卖出可卖部分，剩余部分不记 `Rejection`。买入不做部分成交，资金不够时整单拒绝。
-7. **涨跌停价以上一交易日不复权收盘价为基准**：除权日的真实基准是除权参考价，目前没有调整，除权日的涨跌停判断会偏松（留给 ticket 03）。新股上市初期不设涨跌幅、北交所 30% 等规则也没有建模。
-8. **滑点后的买价可能略高于涨停价**：只有开盘价低于涨停价才会成交，但 `open × 1.001` 可能越过涨停价，没有截断，影响可忽略。
-9. **`Context.history` 每天复制一次**：复杂度 O(n²)，10 年约 2,500 个交易日，可以接受；多标的化时建议改为只读视图。
-10. **计息位置**：在交易日开头为上一段间隔计息，而 spec 写的是「当日末计息」。两者在净值上等价，只是周末利息记到下一交易日。
-11. **`buy_and_hold_nav` 被调用两次**：`compute_metrics` 内部一次（算指标），`cli` 里一次（画图和写 `daily.csv`），结果相同。
+7. **涨跌停价以上一交易日不复权收盘价为基准，除权日改用除权参考价**：参考价由复权因子比例推算，不是交易所公布值，分红金额很小时可能差一分钱。新股上市初期不设涨跌幅、北交所 30% 等规则也没有建模。
+8. **零股只在全部卖出时才能卖干净**：除权取整后持股常带零股（如 1012 股）。A 股要求零股一次性卖出，但按指定数量卖出时引擎不检查这条，可能留下零股；双均线总是全部卖出，不受影响。
+9. **滑点后的买价可能略高于涨停价**：只有开盘价低于涨停价才会成交，但 `open × 1.001` 可能越过涨停价，没有截断，影响可忽略。
+10. **`Context.history` 每天复制一次**：复杂度 O(n²)，10 年约 2,500 个交易日，可以接受；多标的化时建议改为只读视图。
+11. **计息位置**：在交易日开头为上一段间隔计息，而 spec 写的是「当日末计息」。两者在净值上等价，只是周末利息记到下一交易日。
+12. **`buy_and_hold_nav` 被调用两次**：`compute_metrics` 内部一次（算指标），`cli` 里一次（画图和写 `daily.csv`），结果相同。

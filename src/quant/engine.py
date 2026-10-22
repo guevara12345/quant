@@ -42,6 +42,7 @@ def run_backtest(
     rules = StockRules(config.stock)
     history: list[tuple[date, Bar]] = []
     last_close: dict[str, float] = {}
+    last_factor: dict[str, float] = {}
     pending: list[Order] = []
     fills: list[Fill] = []
     rejections: list[Rejection] = []
@@ -56,7 +57,16 @@ def run_backtest(
             portfolio.accrue_interest(config.cash_rate, (day - prev_day).days)
         prev_day = day
 
-        # 1. 撮合上一交易日收盘产生的股票订单（开盘价）
+        # 1. 除权：复权因子较上一个有 bar 的交易日变化时由品种规则调整持仓，
+        #    返回的除权参考价替换前收盘价，作为当日涨跌停基准
+        if bar is not None:
+            prev_factor = last_factor.get(symbol)
+            if prev_factor is not None and bar.adj_factor != prev_factor:
+                last_close[symbol] = rules.apply_ex_rights(
+                    symbol, bar.adj_factor / prev_factor, last_close[symbol], portfolio)
+            last_factor[symbol] = bar.adj_factor
+
+        # 2. 撮合上一交易日收盘产生的股票订单（开盘价）
         if bar is not None:
             for order in pending:
                 outcome = rules.match_at_open(
@@ -70,13 +80,13 @@ def run_backtest(
             history.append((day, bar))
             last_close[symbol] = bar.close
 
-        # 2. 收盘调用策略，订单在下一交易日开盘撮合
+        # 3. 收盘调用策略，订单在下一交易日开盘撮合
         if bar is not None:
             ctx = Context(day=day, symbol=symbol, history=list(history),
                           cash=portfolio.cash, positions=dict(portfolio.positions))
             pending.extend(strategy.on_bar(ctx))
 
-        # 3. 记录当日快照
+        # 4. 记录当日快照
         market_value = sum(q * last_close[s]
                            for s, q in portfolio.positions.items())
         rows.append({

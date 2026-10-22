@@ -2,7 +2,7 @@
 
 检查顺序：停牌 → 涨跌停（开盘价等于涨停价时跳过买单、等于跌停价时跳过卖单）→
 买入按整手取整并检查资金 / 卖出检查持仓与 T+1。没有成交的订单返回 Rejection 并注明原因。
-费用为佣金（有最低额）+ 过户费，卖出另收印花税。除权调整见 ticket 03。
+费用为佣金（有最低额）+ 过户费，卖出另收印花税。除权日持股数按复权因子比例放大、涨跌停以除权参考价为基准（apply_ex_rights）。
 """
 
 from __future__ import annotations
@@ -61,10 +61,22 @@ class StockRules:
             fee += amount * c.stamp_duty_rate
         return fee
 
+    def apply_ex_rights(self, symbol: str, ratio: float, prev_close: float, portfolio: Portfolio) -> float:
+        """除权日开盘前调用；ratio = 当日复权因子 / 前一日复权因子。
+
+        持股数按 ratio 放大，取最近的整股、不要求整手（零股可以卖出），近似分红再投资。
+        返回除权参考价 = 前收盘价 / ratio，四舍五入到分，作为当日涨跌停基准；
+        它由复权因子比例推算，是交易所公布值的近似。
+        """
+        held = portfolio.positions.get(symbol, 0)
+        if held:
+            portfolio.adjust_position(symbol, round(held * ratio))
+        return _to_cent(prev_close / ratio)
+
     def match_at_open(
         self, order: Order, day: date, bar: Bar, prev_close: float | None, portfolio: Portfolio,
     ) -> Fill | Rejection:
-        """按成交日开盘价撮合；prev_close 为上一交易日收盘价（不复权，除权日未调整），没有时不检查涨跌停。"""
+        """按成交日开盘价撮合；prev_close 为涨跌停基准（上一交易日不复权收盘价，除权日为除权参考价），没有时不检查涨跌停。"""
 
         def reject(reason: RejectReason) -> Rejection:
             return Rejection(day, order.symbol, order.side, order.quantity, reason)
@@ -116,5 +128,8 @@ class StockRules:
 
 def limit_price(prev_close: float, multiplier: float) -> float:
     """涨跌停价：前收盘价 × (1 ± 涨跌幅)，四舍五入到分。"""
-    price = Decimal(str(prev_close)) * Decimal(str(multiplier))
-    return float(price.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    return _to_cent(Decimal(str(prev_close)) * Decimal(str(multiplier)))
+
+
+def _to_cent(price: float | Decimal) -> float:
+    return float(Decimal(str(price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))

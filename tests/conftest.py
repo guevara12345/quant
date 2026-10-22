@@ -20,16 +20,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 def make_bar(open: float, close: float | None = None, adj_close: float | None = None,
-             suspended: bool = False, is_st: bool = False) -> Bar:
-    """手工构造一根 bar：未给出的价格按开盘价补齐，后复权价默认等于不复权价。"""
+             adj_factor: float = 1.0, suspended: bool = False, is_st: bool = False) -> Bar:
+    """手工构造一根 bar：未给出的价格按开盘价补齐，后复权价默认等于不复权价 × 复权因子。"""
     close = open if close is None else close
     return Bar(
         open=open,
         high=max(open, close),
         low=min(open, close),
         close=close,
-        adj_close=close if adj_close is None else adj_close,
-        adj_factor=1.0,
+        adj_close=close * adj_factor if adj_close is None else adj_close,
+        adj_factor=adj_factor,
         suspended=suspended,
         is_st=is_st,
     )

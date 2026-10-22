@@ -1,9 +1,9 @@
 # 设计文档：A 股量化研究原型
 
-> **状态**：ticket 01（骨架 + 双均线）、02（A 股撮合规则）已落地；03–06 待实现。
+> **状态**：ticket 01（骨架 + 双均线）、02（A 股撮合规则）、03（除权处理）已落地；04–06 待实现。
 > **需求来源**：`.scratch/a-share-quant-prototype/spec.md`；**术语**以 [`GLOSSARY.md`](../GLOSSARY.md) 为准；**决策**见 [`docs/adr/`](adr/)。
 > **现有代码导读**：[`code-walkthrough.md`](code-walkthrough.md)。
-> 本文说明系统的设计原则与目标形态，以及 03–06 要把代码演进成什么样。凡是尚未实现的内容都标注「目标」。
+> 本文说明系统的设计原则与目标形态，以及 04–06 要把代码演进成什么样。凡是尚未实现的内容都标注「目标」。
 >
 > 文中的图使用 Mermaid，在 GitHub、VS Code（Markdown Preview Mermaid Support 插件）、Typora 中都能直接渲染。
 
@@ -33,17 +33,17 @@
 
 ## 2. 现状与差距
 
-ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易日推进的引擎、策略接口、双均线、指标与报告、命令行入口；ticket 02 补上了 A 股撮合规则（T+1、整手、涨跌停、停牌、完整费用、滑点、资金检查）和未成交记录。代码如何运转见 [`code-walkthrough.md`](code-walkthrough.md)。
+ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易日推进的引擎、策略接口、双均线、指标与报告、命令行入口；ticket 02 补上了 A 股撮合规则（T+1、整手、涨跌停、停牌、完整费用、滑点、资金检查）和未成交记录；ticket 03 补上了除权处理（持股按复权因子放大、除权日涨跌停以除权参考价为基准）。代码如何运转见 [`code-walkthrough.md`](code-walkthrough.md)。
 
 | 模块 | 现状 | 目标 |
 | --- | --- | --- |
 | `data/feed.py`、`data/cache.py`、`data/baostock_feed.py` | 已实现 | `Bar` 增加 `settle`（04） |
 | `data/akshare_feed.py` | — | IC 分合约、中证 500、510500（04、05） |
 | `portfolio.py` | 现金 + 股数 + 当日买入（可卖数量）；`Rejection` | 保证金占用、平今（04） |
-| `instruments/stock.py` | 完整 A 股撮合规则（含板块涨跌幅） | 除权调整（03） |
+| `instruments/stock.py` | 完整 A 股撮合规则（含板块涨跌幅、除权调整） | — |
 | `instruments/future.py`、`instruments/option.py` | — | 04、05 |
 | `calendars.py`、`pricing.py` | — | 到期日、行权价网格；BS 模型价与 delta（04、05） |
-| `engine.py` | 单标的、撮合规则写死为股票 | 多标的、按品种分派、完整每日事件顺序（03、04） |
+| `engine.py` | 单标的、撮合规则写死为股票；除权 → 撮合 → 策略 → 快照 | 多标的、按品种分派、完整每日事件顺序（04） |
 | `strategy.py` | 单标的 `Context` | 多标的 `Context`（04） |
 | `strategies/roll_ic.py` | — | 04、06 |
 | `metrics.py`、`report.py` | 单策略 vs 买入持有；`rejections.csv` | 三条曲线、收益拆解、分段指标（04、06） |
@@ -51,7 +51,6 @@ ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易�
 与目标相比最关键的差距：
 
 - 引擎只能处理一个标的，撮合规则写死为 `StockRules`，尚未达到 ADR-0001 的「按品种分派」。
-- 没有除权调整，持仓跨除权日时策略净值与后复权基准会出现偏差。
 
 ## 3. 设计原则
 
@@ -179,7 +178,7 @@ flowchart TD
 flowchart TD
     O([股票订单，成交日开盘]) --> S{停牌?}
     S -- 是 --> RJ1[Rejection 停牌]
-    S -- 否 --> L["计算涨跌停价<br/>前收 × (1 ± 板块限幅)"]
+    S -- 否 --> L["计算涨跌停价<br/>前收（除权日为除权参考价）× (1 ± 板块限幅)"]
     L --> Side{方向}
     Side -- 买 --> LU{开盘 = 涨停价?}
     LU -- 是 --> RJ2[Rejection 涨停]
@@ -200,9 +199,9 @@ flowchart TD
 | 整手 | 买入向下取整到 100 股；卖出不取整（可卖出零股） |
 | 费用 | 佣金万 2.5（最低 5 元）+ 卖出印花税 0.05% + 过户费 0.001% |
 | 滑点 | 0.1%，方向对交易者不利 |
-| 除权 | 除权日持股 × (当日因子 / 前一日因子)，近似分红再投资（03） |
+| 除权 | 除权日开盘前持股 × (当日因子 / 前一日因子)，取最近的整股，近似分红再投资；当日涨跌停以除权参考价 = 前收 × 前一日因子 / 当日因子（四舍五入到分）为基准（03） |
 
-02 已按上图实现（`instruments/stock.py`），所有参数在 `StockConfig` 中可配置。图外补充的两种拒单原因：显式数量不足 100 股（不足整手）、卖出时没有持仓（无持仓），保证每笔未成交订单都有原因。被拒的订单不顺延到下一交易日。
+02、03 已按上图实现（`instruments/stock.py`），所有参数在 `StockConfig` 中可配置。图外补充的两种拒单原因：显式数量不足 100 股（不足整手）、卖出时没有持仓（无持仓），保证每笔未成交订单都有原因。被拒的订单不顺延到下一交易日。
 
 ### 6.2 期货（ticket 04）
 
@@ -288,19 +287,19 @@ gantt
 ```mermaid
 flowchart LR
     T01["01 骨架 + 双均线<br/>✅ 已完成"] --> T02["02 A 股撮合规则<br/>✅ 已完成"]
-    T01 --> T03[03 除权处理]
+    T01 --> T03["03 除权处理<br/>✅ 已完成"]
     T01 --> T04[04 纯滚 IC]
     T01 --> T05[05 ETF 期权与模型价]
     T04 --> T06[06 滚 IC + put delta 中性]
     T05 --> T06
     classDef done fill:#e8f5e9,stroke:#2e7d32
-    class T01,T02 done
+    class T01,T02,T03 done
 ```
 
 | Ticket | 主要改动模块 | 接口变化 |
 | --- | --- | --- |
 | 02 ✅ | `instruments/stock.py`、`portfolio.py`、`engine.py`、`report.py` | 新增 `Rejection`、`BacktestResult.rejections`；`Portfolio.sellable` 给出可卖数量 |
-| 03 | `engine.py`（除权步骤）、`instruments/stock.py` | 无 |
+| 03 ✅ | `engine.py`（除权步骤）、`instruments/stock.py`、`portfolio.py` | 新增 `Portfolio.adjust_position`、`StockRules.apply_ex_rights` |
 | 04 | `akshare_feed.py`、`instruments/future.py`、`calendars.py`、`strategies/roll_ic.py`、`report.py` | `Bar.settle`；引擎多标的化与品种分派；`daily` 增加 margin、basis |
 | 05 | `pricing.py`、`instruments/option.py`、`calendars.py` | 期权估值接入净值 |
 | 06 | `strategies/roll_ic.py`、`report.py` | `daily.net_delta`、收益拆解 |
@@ -312,7 +311,7 @@ flowchart LR
 - 衍生品按当日收盘成交带来少量日内乐观偏差，已接受；不要改成次日开盘，除非同时引入日内数据（ADR-0003）。
 - 期权模型价不含波动率曲面和买卖价差，对冲成本可能被高估或低估；2022-09 之前的 put 完全是假设品种（ADR-0002）。
 - 只记录保证金占用，不模拟追保与强平。
-- 除权处理是分红再投资的近似。
-- 涨跌停价以前一交易日不复权收盘价为基准，除权日未改用除权参考价；新股上市初期无涨跌幅、北交所 30% 等规则未建模。
+- 除权处理是分红再投资的近似：现金红利按复权因子折成股数，不计红利税，零股取整到最近的整股。
+- 除权日的除权参考价由复权因子比例推算，不是交易所公布值；新股上市初期无涨跌幅、北交所 30% 等规则未建模。
 - 缓存覆盖区间是单一连续区间，数据源中间缺失的日期不会被自动发现。
 - 预期 delta 中性方案的结果可能为负——这是原型要回答的问题，不是缺陷。

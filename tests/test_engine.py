@@ -5,7 +5,7 @@ import pytest
 from quant.engine import BacktestConfig, run_backtest
 from quant.strategy import Order, Side, Strategy
 
-from .conftest import make_feed, stock_costs
+from .conftest import make_bar, make_feed, stock_costs
 
 SYMBOL = "sh.600000"
 
@@ -140,3 +140,31 @@ def test_interest_for_the_gap_accrues_on_previous_close_cash_before_open_fills()
                           start=date(2024, 1, 5), end=date(2024, 1, 8), config=config)
     # 100,000 × (1 + 1.5% × 3 / 365) − 10,000
     assert result.daily["cash"].iloc[-1] == pytest.approx(90_012.3288)
+
+
+def test_position_scales_by_factor_ratio_on_ex_rights_day_so_nav_does_not_drop():
+    # 01-03 是除权日：每 10 股送 1 股，因子 1.0 → 1.1，不复权价 11 → 10，后复权价连续
+    # 1000 股 × 11 = 11,000；除权后 1000 × 1.1 = 1100 股 × 10 = 11,000，净值不变
+    feed = make_feed(SYMBOL, {
+        date(2024, 1, 2): (10, 10),
+        date(2024, 1, 3): (10.5, 11),  # 开盘 10.5 买入成交
+        date(2024, 1, 4): make_bar(10, 10, adj_factor=1.1),
+    })
+    result = run_backtest(feed, BuyOnceOnFirstDay(1000), symbol=SYMBOL,
+                          start=date(2024, 1, 2), end=date(2024, 1, 4), config=NO_COSTS)
+    assert [p.get(SYMBOL, 0) for p in result.daily["positions"]] == [0, 1000, 1100]
+    # 100,000 − 10,500 + 11,000
+    assert list(result.daily["nav"]) == pytest.approx([100_000, 100_500, 100_500])
+
+
+def test_ex_rights_adjusted_position_rounds_to_whole_shares_and_can_all_be_sold():
+    # 现金分红再投资：因子比例 1.0123，1000 股 → 1012.3 股，取最近的整股 1012（零股可以卖出）
+    feed = make_feed(SYMBOL, {
+        date(2024, 1, 2): (10, 10),
+        date(2024, 1, 3): (10, 10),  # 买入成交；收盘发出卖出信号
+        date(2024, 1, 4): make_bar(9.9, 9.9, adj_factor=1.0123),  # 除权日，卖出成交
+    })
+    result = run_backtest(feed, BuyThenSellAll(), symbol=SYMBOL,
+                          start=date(2024, 1, 2), end=date(2024, 1, 4), config=NO_COSTS)
+    assert result.fills.iloc[-1]["quantity"] == 1012
+    assert result.daily["positions"].iloc[-1] == {}

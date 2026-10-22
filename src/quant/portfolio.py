@@ -72,5 +72,12 @@ class Portfolio:
         else:
             self.positions.pop(fill.symbol, None)
 
+    def adjust_position(self, symbol: str, quantity: int) -> None:
+        """公司行为（如除权）直接改写持股数：不产生成交，不动现金。"""
+        if quantity:
+            self.positions[symbol] = quantity
+        else:
+            self.positions.pop(symbol, None)
+
     def accrue_interest(self, annual_rate: float, days: int) -> None:
         self.cash *= 1 + annual_rate * days / 365
