@@ -1,4 +1,4 @@
-"""报告输出：指标文本、净值图（策略 vs 基准）、成交表、未成交订单表和每日状态表。"""
+"""报告输出：指标文本、净值图（策略 vs 基准）、成交表、未成交订单表、警告表和每日状态表。"""
 
 from __future__ import annotations
 
@@ -54,25 +54,42 @@ def format_rejections(result: BacktestResult) -> str:
     return f"未成交订单 {len(rejections)} 笔：{counts}"
 
 
-def write_report(out_dir: Path, title: str, result: BacktestResult, benchmark: pd.Series, metrics: dict) -> None:
+def format_alerts(result: BacktestResult) -> str:
+    alerts = result.alerts
+    lines = [f"警告 {len(alerts)} 条"]
+    lines += [f"  {a['date']} {a['symbol']}：{a['message']}"
+              for a in alerts.to_dict("records")]
+    return "\n".join(lines)
+
+
+def write_report(
+    out_dir: Path, title: str, result: BacktestResult, benchmark: pd.Series, metrics: dict,
+    extra_daily: pd.DataFrame | None = None,
+    labels: tuple[str, str] = ("策略", "买入持有"),
+) -> None:
+    """extra_daily：按 date 并入 daily.csv 的附加列（如基差、年化贴水率）；labels：净值图中策略与基准的图例。"""
     out_dir.mkdir(parents=True, exist_ok=True)
     result.fills.to_csv(out_dir / "fills.csv",
                         index=False, encoding="utf-8-sig")
     result.rejections.to_csv(out_dir / "rejections.csv",
                              index=False, encoding="utf-8-sig")
+    result.alerts.to_csv(out_dir / "alerts.csv",
+                         index=False, encoding="utf-8-sig")
     daily = result.daily.copy()
     daily["positions"] = daily["positions"].map(
         lambda p: json.dumps(p, ensure_ascii=False))
     daily["benchmark_nav"] = daily["date"].map(benchmark)
+    if extra_daily is not None:
+        daily = daily.merge(extra_daily, on="date", how="left")
     daily.to_csv(out_dir / "daily.csv", index=False, encoding="utf-8-sig")
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False, default=float),
                                           encoding="utf-8")
 
     nav = result.daily.set_index("date")["nav"]
     fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(pd.to_datetime(nav.index), nav / nav.iloc[0], label="策略")
+    ax.plot(pd.to_datetime(nav.index), nav / nav.iloc[0], label=labels[0])
     ax.plot(pd.to_datetime(benchmark.index), benchmark /
-            benchmark.iloc[0], label="买入持有", alpha=0.7)
+            benchmark.iloc[0], label=labels[1], alpha=0.7)
     ax.set_title(title)
     ax.set_ylabel("净值")
     ax.grid(alpha=0.3)

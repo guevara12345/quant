@@ -1,9 +1,9 @@
 # 设计文档：A 股量化研究原型
 
-> **状态**：ticket 01（骨架 + 双均线）、02（A 股撮合规则）、03（除权处理）已落地；04–06 待实现。
+> **状态**：ticket 01（骨架 + 双均线）、02（A 股撮合规则）、03（除权处理）、04（纯滚 IC）已落地；05–06 待实现。
 > **需求来源**：`.scratch/a-share-quant-prototype/spec.md`；**术语**以 [`GLOSSARY.md`](../GLOSSARY.md) 为准；**决策**见 [`docs/adr/`](adr/)。
 > **现有代码导读**：[`code-walkthrough.md`](code-walkthrough.md)。
-> 本文说明系统的设计原则与目标形态，以及 04–06 要把代码演进成什么样。凡是尚未实现的内容都标注「目标」。
+> 本文说明系统的设计原则与目标形态，以及 05–06 要把代码演进成什么样。凡是尚未实现的内容都标注「目标」。
 >
 > 文中的图使用 Mermaid，在 GitHub、VS Code（Markdown Preview Mermaid Support 插件）、Typora 中都能直接渲染。
 
@@ -33,24 +33,25 @@
 
 ## 2. 现状与差距
 
-ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易日推进的引擎、策略接口、双均线、指标与报告、命令行入口；ticket 02 补上了 A 股撮合规则（T+1、整手、涨跌停、停牌、完整费用、滑点、资金检查）和未成交记录；ticket 03 补上了除权处理（持股按复权因子放大、除权日涨跌停以除权参考价为基准）。代码如何运转见 [`code-walkthrough.md`](code-walkthrough.md)。
+ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易日推进的引擎、策略接口、双均线、指标与报告、命令行入口；ticket 02 补上了 A 股撮合规则（T+1、整手、涨跌停、停牌、完整费用、滑点、资金检查）和未成交记录；ticket 03 补上了除权处理（持股按复权因子放大、除权日涨跌停以除权参考价为基准）；ticket 04 把引擎改成多标的、按品种分派，加上期货规则、IC 到期日历、中金所与 AKShare 数据适配器和纯滚 IC 策略。代码如何运转见 [`code-walkthrough.md`](code-walkthrough.md)。
 
 | 模块 | 现状 | 目标 |
 | --- | --- | --- |
-| `data/feed.py`、`data/cache.py`、`data/baostock_feed.py` | 已实现 | `Bar` 增加 `settle`（04） |
-| `data/akshare_feed.py` | — | IC 分合约、中证 500、510500（04、05） |
-| `portfolio.py` | 现金 + 股数 + 当日买入（可卖数量）；`Rejection` | 保证金占用、平今（04） |
-| `instruments/stock.py` | 完整 A 股撮合规则（含板块涨跌幅、除权调整） | — |
-| `instruments/future.py`、`instruments/option.py` | — | 04、05 |
-| `calendars.py`、`pricing.py` | — | 到期日、行权价网格；BS 模型价与 delta（04、05） |
-| `engine.py` | 单标的、撮合规则写死为股票；除权 → 撮合 → 策略 → 快照 | 多标的、按品种分派、完整每日事件顺序（04） |
-| `strategy.py` | 单标的 `Context` | 多标的 `Context`（04） |
-| `strategies/roll_ic.py` | — | 04、06 |
-| `metrics.py`、`report.py` | 单策略 vs 买入持有；`rejections.csv` | 三条曲线、收益拆解、分段指标（04、06） |
+| `data/feed.py`、`data/cache.py`、`data/baostock_feed.py` | 已实现；`Bar.settle`；缓存按月分段补拉（断点续拉） | — |
+| `data/cffex_feed.py`、`data/akshare_feed.py` | IC 分合约日线与结算价（中金所月度数据包）、中证 500（AKShare） | 510500（05） |
+| `portfolio.py` | 现金 + 持仓 + 当日买入（可卖数量 / 平昨数量）；期货盯市基准价与保证金占用；`Rejection`、`Alert` | — |
+| `instruments/stock.py`、`instruments/future.py` | A 股撮合规则；期货收盘成交、盯市、平今平昨、保证金、到期强平 | — |
+| `instruments/option.py` | — | 05 |
+| `calendars.py` | IC 到期日、季月合约、工作日延伸日历 | 期权到期日、行权价网格（05） |
+| `pricing.py` | — | BS 模型价与 delta（05） |
+| `engine.py` | 多标的、按品种分派（`InstrumentRules`）、完整每日事件顺序 | — |
+| `strategy.py` | 多标的 `Context`、`Strategy.universe` | — |
+| `strategies/roll_ic.py` | 纯滚 IC（`--no-hedge`） | put 对冲（06） |
+| `metrics.py`、`report.py` | 策略 vs 基准；基差与年化贴水率；`rejections.csv`、`alerts.csv` | 三条曲线、收益拆解、分段指标（06） |
 
 与目标相比最关键的差距：
 
-- 引擎只能处理一个标的，撮合规则写死为 `StockRules`，尚未达到 ADR-0001 的「按品种分派」。
+- 期权品种与 BS 模型价（05）、put 对冲与收益拆解（06）尚未实现。
 
 ## 3. 设计原则
 
@@ -146,16 +147,15 @@ classDiagram
     }
 ```
 
-### 4.1 从单标的到多标的
+### 4.1 从单标的到多标的（04 已实现）
 
-- `run_backtest(feed, strategy, start, end, config)`：去掉 `symbol` 参数，标的由策略声明（如 `strategy.universe(day)`）。
-- `Context` 提供 `bar(symbol)` / `history(symbol, n)`，仍只返回截至当日的数据。
-- `MaCross` 改为构造时接收 symbol。
+- `run_backtest(feed, strategy, start, end, config)`：去掉了 `symbol` 参数，标的由策略声明（`strategy.universe(day)`），引擎另外带上持仓和待撮合订单中的品种。
+- `Context` 提供 `bar(symbol)`（当日）、`history(symbol)`（截至当日）和 `trading_days(start, end)`（交易日历是事先公布的公开信息，可查未来日期）。
+- `MaCross` 构造时接收 symbol。
 - `DataFeed` 协议不变。
+- 品种规则实现 `InstrumentRules` 协议（`instruments/__init__.py`）：`fills_at_close`、`before_open`、`match`、`apply`、`after_close`、`market_value`；引擎按代码分派（`IC2412` 这类代码 → `FutureRules`，其余 → `StockRules`）。涨跌停基准价、复权因子等按品种的状态放在规则对象里，每次回测新建。
 
-建议先做一次**不改变行为**的重构完成多标的化，让现有测试保持通过，再加期货规则。
-
-## 5. 目标每日事件顺序
+## 5. 每日事件顺序
 
 ```mermaid
 flowchart TD
@@ -169,6 +169,8 @@ flowchart TD
 ```
 
 股票订单进入 `pending` 隔日撮合；衍生品订单在策略返回后当日立即撮合。引擎按订单的品种类型决定路径，策略无需关心。
+
+04 的实现与上图的差别只有一处：现金计息放在每个交易日开头，为上一段间隔（含周末）计息，与「当日末计息」在净值上等价。期权（05）接入后在 F 步按内在价值结算。
 
 ## 6. 品种规则
 
@@ -207,10 +209,12 @@ flowchart TD
 
 - 合约乘数 200，**名义本金** = 价格 × 200。
 - 当日收盘价 ± 0.2 点滑点成交。
-- 开仓与平昨万 0.23，平今万 2.3。
+- 开仓与平昨万 0.23，平今万 2.3；同时有昨仓和今仓时**先平昨、后平今**。
 - 每日按**结算价**盯市，盈亏计入现金；开仓不扣名义本金，只扣费用。
-- 保证金占用 = 名义本金 × 14%，只展示，不追保不强平。
-- 到期日仍持仓 → 按结算价强制平仓并记 warning。
+- 保证金占用 = 持仓 × 乘数 × 结算价（当日开仓时为成交价）× 14%，只展示，不追保不强平；开仓时要求现金覆盖全部保证金和费用，否则记「资金不足」（spec 用户故事 17）。被保证金占用的现金不算闲置，不计息。
+- 只支持多头：买入开仓、卖出平仓；卖出超过持仓时只平掉持仓。
+- 到期日（每月第三个周五，遇节假日顺延）仍持仓 → 按结算价强制平仓，记入 `alerts`（`alerts.csv`、终端、日志警告）。
+- 所有参数在 `FutureConfig` 中可配置（`--set future.margin_rate=0.12`）。
 
 期货账户的现金变化与股票不同：
 
@@ -248,9 +252,11 @@ flowchart TD
     Rebal --> End
 ```
 
+「当季合约」在本项目中指尚未进入展期窗口的最近一个季月合约（可能同时是交易所口径的当月或下月合约），见甘特图。04 已实现图中「否（--no-hedge）」一支（`strategies/roll_ic.py`），展期日 = 距到期还剩 `roll_days` 个交易日的那天（如 2024-12-20 到期、展期 5 日 → 12-13 展期）。
+
 | 参数 | 默认 |
 | --- | --- |
-| 建仓手数 | floor(可用资金 / IC 名义本金)，1 倍名义本金 |
+| 建仓手数 | floor(可用资金 / IC 名义本金)，1 倍名义本金；按建仓日收盘价计算 |
 | IC 到期日 | 每月第三个周五，遇节假日顺延 |
 | 展期 / put 换月 | 到期前 5 个交易日 |
 | put 选择 | 平值（行权价网格向下取最近一档）、次月 |
@@ -277,8 +283,9 @@ gantt
 | 输出 | 内容 | Ticket |
 | --- | --- | --- |
 | `rejections.csv` | 未成交订单及原因（已实现，终端同时打印按原因计数） | 02 |
-| `daily.csv` 新列 | margin、basis、annualized_discount、net_delta | 04、06 |
-| 净值图 | 滚 IC：本策略、纯滚 IC、中证 500 三条曲线 | 04、06 |
+| `daily.csv` 新列 | margin、contract、basis、annualized_discount（04 已实现）；net_delta | 04、06 |
+| `alerts.csv` | 到期强制平仓等警告（04 已实现，终端同时打印） | 04 |
+| 净值图 | 纯滚 IC vs 中证 500 买入持有（04 已实现）；06 加上本策略成三条曲线 | 04、06 |
 | 收益拆解 | 贴水收敛、put 成本、交易费用、现金利息，之和 = 总盈亏 | 06 |
 | 分段指标 | 500ETF 期权上市（2022-09）前后分别给出，并标注模型价 | 06 |
 
@@ -288,23 +295,23 @@ gantt
 flowchart LR
     T01["01 骨架 + 双均线<br/>✅ 已完成"] --> T02["02 A 股撮合规则<br/>✅ 已完成"]
     T01 --> T03["03 除权处理<br/>✅ 已完成"]
-    T01 --> T04[04 纯滚 IC]
+    T01 --> T04["04 纯滚 IC<br/>✅ 已完成"]
     T01 --> T05[05 ETF 期权与模型价]
     T04 --> T06[06 滚 IC + put delta 中性]
     T05 --> T06
     classDef done fill:#e8f5e9,stroke:#2e7d32
-    class T01,T02,T03 done
+    class T01,T02,T03,T04 done
 ```
 
 | Ticket | 主要改动模块 | 接口变化 |
 | --- | --- | --- |
 | 02 ✅ | `instruments/stock.py`、`portfolio.py`、`engine.py`、`report.py` | 新增 `Rejection`、`BacktestResult.rejections`；`Portfolio.sellable` 给出可卖数量 |
 | 03 ✅ | `engine.py`（除权步骤）、`instruments/stock.py`、`portfolio.py` | 新增 `Portfolio.adjust_position`、`StockRules.apply_ex_rights` |
-| 04 | `akshare_feed.py`、`instruments/future.py`、`calendars.py`、`strategies/roll_ic.py`、`report.py` | `Bar.settle`；引擎多标的化与品种分派；`daily` 增加 margin、basis |
+| 04 ✅ | `cffex_feed.py`、`akshare_feed.py`、`instruments/future.py`、`calendars.py`、`strategies/roll_ic.py`、`engine.py`、`report.py` | `Bar.settle`；`Strategy.universe`、多标的 `Context`；`InstrumentRules` 与品种分派；`BacktestResult.alerts`；`daily` 增加 margin，报告增加 basis、annualized_discount |
 | 05 | `pricing.py`、`instruments/option.py`、`calendars.py` | 期权估值接入净值 |
 | 06 | `strategies/roll_ic.py`、`report.py` | `daily.net_delta`、收益拆解 |
 
-04 是结构性改动最大的一步。
+04 是结构性改动最大的一步，已完成。
 
 ## 10. 已知限制与风险
 
@@ -313,5 +320,8 @@ flowchart LR
 - 只记录保证金占用，不模拟追保与强平。
 - 除权处理是分红再投资的近似：现金红利按复权因子折成股数，不计红利税，零股取整到最近的整股。
 - 除权日的除权参考价由复权因子比例推算，不是交易所公布值；新股上市初期无涨跌幅、北交所 30% 等规则未建模。
-- 缓存覆盖区间是单一连续区间，数据源中间缺失的日期不会被自动发现。
+- 缓存覆盖区间是单一连续区间，数据源中间缺失的日期不会被自动发现。按月分段补拉只对向后延伸生效；把起点往前提时缺口仍一次拉完。
+- 已公布的交易日历之后用工作日延伸（忽略未来节假日），只用于数到期前的交易日；回测本身只推进到最后一个已公布的交易日。
+- IC 分合约数据直接取自中金所官网月度数据包，而不是 spec 写的 AKShare：AKShare 读的是同一个数据包，但逐日请求、每次重新下载整月 zip，且写死的浏览器 User-Agent 在部分网络环境下被安全网关拦截后静默返回空表。中证 500 仍走 AKShare。
+- 基差用期货与指数的**收盘价**计算（不是结算价）；年化贴水率按距到期的自然日折算。
 - 预期 delta 中性方案的结果可能为负——这是原型要回答的问题，不是缺陷。

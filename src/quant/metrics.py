@@ -8,6 +8,7 @@ import pandas as pd
 
 from quant.data.feed import DataFeed
 from quant.engine import BacktestResult
+from quant.instruments.future import expiry_of, is_future
 from quant.strategy import Side
 
 TRADING_DAYS_PER_YEAR = 252
@@ -21,6 +22,27 @@ def buy_and_hold_nav(
     return initial_cash * prices / prices.iloc[0]
 
 
+def basis_table(result: BacktestResult, feed: DataFeed, index_symbol: str) -> pd.DataFrame:
+    """每日收盘后所持期货合约的基差（期货收盘价 − 指数收盘价）与年化贴水率。
+
+    年化贴水率 = −基差 / 指数点位 × 365 / 距到期自然日数；贴水时为正。未持有期货或缺行情的日子为 NaN。
+    """
+    rows = []
+    for day, positions in zip(result.daily["date"], result.daily["positions"]):
+        contract = next((s for s in positions if is_future(s)), None)
+        future = feed.bar(contract, day) if contract else None
+        index = feed.bar(index_symbol, day)
+        basis = discount = float("nan")
+        if contract and future is not None and index is not None:
+            basis = future.close - index.close
+            days_left = (expiry_of(contract, feed.trading_days) - day).days
+            if days_left > 0:
+                discount = -basis / index.close * 365 / days_left
+        rows.append({"date": day, "contract": contract,
+                     "basis": basis, "annualized_discount": discount})
+    return pd.DataFrame(rows, columns=["date", "contract", "basis", "annualized_discount"])
+
+
 def compute_metrics(
         result: BacktestResult, feed: DataFeed, symbol: str, risk_free_rate: float = 0.015) -> dict:
     nav = result.daily.set_index("date")["nav"]
@@ -29,7 +51,8 @@ def compute_metrics(
     years = (nav.index[-1] - nav.index[0]).days / 365
 
     fills = result.fills
-    traded_amount = (fills["quantity"] * fills["price"]).sum()
+    traded_amount = (fills["quantity"] * fills["price"]
+                     * fills["multiplier"]).sum()
     wins, trades = _round_trip_wins(fills)
 
     metrics = {
@@ -39,7 +62,7 @@ def compute_metrics(
         "sharpe": _sharpe(nav, risk_free_rate),
         "win_rate": wins / trades if trades else float("nan"),
         "trade_count": trades,
-        # 年化换手率：单边成交额 / 平均净值 / 年数
+        # 年化换手率：单边成交额（衍生品为名义本金）/ 平均净值 / 年数
         "turnover": traded_amount / 2 / nav.mean() / years if years > 0 else float("nan"),
         "total_fees": fills["fee"].sum(),
         "benchmark_total_return": benchmark.iloc[-1] / benchmark.iloc[0] - 1,
@@ -75,7 +98,7 @@ def _round_trip_wins(fills: pd.DataFrame) -> tuple[int, int]:
     wins = trades = 0
     for f in fills.to_dict("records"):
         symbol, qty, amount, fee = f["symbol"], int(
-            f["quantity"]), f["quantity"] * f["price"], f["fee"]
+            f["quantity"]), f["quantity"] * f["price"] * f["multiplier"], f["fee"]
         held = quantity.get(symbol, 0)
         if f["side"] == Side.BUY.value:
             quantity[symbol] = held + qty

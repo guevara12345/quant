@@ -19,5 +19,5 @@ testpaths = ["tests"]
 markers = ["network: 需要联网的冒烟测试，默认跳过（用 --run-network 启用）"]
 
 [[tool.mypy.overrides]]
-module = ["baostock"]
+module = ["baostock", "akshare"]
 ignore_missing_imports = true

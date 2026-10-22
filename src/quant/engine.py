@@ -1,19 +1,26 @@
-"""按交易日推进的回测引擎。引擎本身不含品种特有逻辑（ADR-0001），撮合规则由品种规则负责。"""
+"""按交易日推进的回测引擎。引擎本身不含品种特有逻辑（ADR-0001），按品种分派给品种规则。"""
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass, field
 from datetime import date
 
 import pandas as pd
 
 from quant.data.feed import Bar, DataFeed
+from quant.instruments import InstrumentRules
+from quant.instruments.future import FutureConfig, FutureRules, is_future
 from quant.instruments.stock import StockConfig, StockRules
-from quant.portfolio import Fill, Portfolio, Rejection
+from quant.portfolio import Alert, Fill, Portfolio, RejectReason, Rejection
 from quant.strategy import Context, Order, Strategy
 
-FILL_COLUMNS = ["date", "symbol", "side", "quantity", "price", "fee"]
+log = logging.getLogger(__name__)
+
+FILL_COLUMNS = ["date", "symbol", "side",
+                "quantity", "price", "fee", "multiplier"]
 REJECTION_COLUMNS = ["date", "symbol", "side", "quantity", "reason"]
+ALERT_COLUMNS = ["date", "symbol", "message"]
 
 
 @dataclass(frozen=True)
@@ -21,78 +28,110 @@ class BacktestConfig:
     initial_cash: float = 3_000_000.0
     cash_rate: float = 0.015  # 闲置现金年化利率，按自然日计息
     stock: StockConfig = field(default_factory=StockConfig)
+    future: FutureConfig = field(default_factory=FutureConfig)
 
 
 @dataclass
 class BacktestResult:
-    daily: pd.DataFrame  # date, cash, market_value, nav, positions
+    daily: pd.DataFrame  # date, cash, market_value, margin, nav, positions
     fills: pd.DataFrame  # FILL_COLUMNS
     rejections: pd.DataFrame  # REJECTION_COLUMNS，未成交订单及原因
+    alerts: pd.DataFrame  # ALERT_COLUMNS，如到期强制平仓
+
+
+class _Dispatcher:
+    """按品种代码选规则对象。"""
+
+    def __init__(self, config: BacktestConfig, feed: DataFeed):
+        self.stock = StockRules(config.stock)
+        self.future = FutureRules(config.future, feed)
+
+    def __call__(self, symbol: str) -> InstrumentRules:
+        return self.future if is_future(symbol) else self.stock
 
 
 def run_backtest(
     feed: DataFeed,
     strategy: Strategy,
-    symbol: str,
     start: date,
     end: date,
     config: BacktestConfig = BacktestConfig(),
 ) -> BacktestResult:
     portfolio = Portfolio(cash=config.initial_cash)
-    rules = StockRules(config.stock)
-    history: list[tuple[date, Bar]] = []
-    last_close: dict[str, float] = {}
-    last_factor: dict[str, float] = {}
+    rules_for = _Dispatcher(config, feed)
+    history: dict[str, list[tuple[date, Bar]]] = {}
     pending: list[Order] = []
     fills: list[Fill] = []
     rejections: list[Rejection] = []
+    alerts: list[Alert] = []
     rows = []
     prev_day: date | None = None
 
-    for day in feed.trading_days(start, end):
-        bar = feed.bar(symbol, day)
+    def execute(order: Order, day: date, bar: Bar) -> None:
+        rules = rules_for(order.symbol)
+        outcome = rules.match(order, day, bar, portfolio)
+        if isinstance(outcome, Fill):
+            rules.apply(outcome, portfolio)
+            fills.append(outcome)
+        else:
+            rejections.append(outcome)
 
-        # 0. 现金计息：上一交易日收盘后的现金在两个交易日之间闲置，按间隔的自然日数计息
+    for day in feed.trading_days(start, end):
+        symbols = list(dict.fromkeys(
+            [*strategy.universe(day), *portfolio.positions, *(o.symbol for o in pending)]))
+        bars = {s: b for s in symbols if (b := feed.bar(s, day)) is not None}
+
+        # 0. 现金计息：上一交易日收盘后的闲置现金（扣除保证金占用）按间隔的自然日数计息
         if prev_day is not None:
             portfolio.accrue_interest(config.cash_rate, (day - prev_day).days)
         prev_day = day
 
-        # 1. 除权：复权因子较上一个有 bar 的交易日变化时由品种规则调整持仓，
-        #    返回的除权参考价替换前收盘价，作为当日涨跌停基准
-        if bar is not None:
-            prev_factor = last_factor.get(symbol)
-            if prev_factor is not None and bar.adj_factor != prev_factor:
-                last_close[symbol] = rules.apply_ex_rights(
-                    symbol, bar.adj_factor / prev_factor, last_close[symbol], portfolio)
-            last_factor[symbol] = bar.adj_factor
+        # 1. 开盘前调整（股票除权：持股按复权因子放大、涨跌停改以除权参考价为基准）
+        for s, bar in bars.items():
+            rules_for(s).before_open(s, day, bar, portfolio)
 
-        # 2. 撮合上一交易日收盘产生的股票订单（开盘价）
-        if bar is not None:
-            for order in pending:
-                outcome = rules.match_at_open(
-                    order, day, bar, last_close.get(symbol), portfolio)
-                if isinstance(outcome, Fill):
-                    portfolio.apply(outcome)
-                    fills.append(outcome)
+        # 2. 撮合上一交易日收盘产生的开盘成交订单；当日无行情的品种，订单留到下一个有行情的交易日
+        waiting = []
+        for order in pending:
+            if order.symbol in bars:
+                execute(order, day, bars[order.symbol])
+            else:
+                waiting.append(order)
+        pending = waiting
+        for s, bar in bars.items():
+            history.setdefault(s, []).append((day, bar))
+
+        # 3. 收盘调用策略；开盘成交的订单进 pending，收盘成交的订单当日撮合（ADR-0003）
+        if bars:
+            ctx = Context(day=day, cash=portfolio.cash, positions=dict(portfolio.positions),
+                          bars=dict(bars), _history=history, _trading_days=feed.trading_days)
+            for order in strategy.on_bar(ctx):
+                if not rules_for(order.symbol).fills_at_close:
+                    pending.append(order)
+                elif (quote := bars.get(order.symbol) or feed.bar(order.symbol, day)) is not None:
+                    execute(order, day, quote)
                 else:
-                    rejections.append(outcome)
-            pending = []
-            history.append((day, bar))
-            last_close[symbol] = bar.close
+                    rejections.append(Rejection(
+                        day, order.symbol, order.side, order.quantity, RejectReason.NO_QUOTE))
 
-        # 3. 收盘调用策略，订单在下一交易日开盘撮合
-        if bar is not None:
-            ctx = Context(day=day, symbol=symbol, history=list(history),
-                          cash=portfolio.cash, positions=dict(portfolio.positions))
-            pending.extend(strategy.on_bar(ctx))
+        # 4. 收盘后处理：盯市、到期强制平仓等
+        for s in dict.fromkeys([*bars, *portfolio.positions]):
+            forced, warned = rules_for(s).after_close(
+                s, day, bars.get(s), portfolio)
+            fills.extend(forced)
+            alerts.extend(warned)
+            for alert in warned:
+                log.warning("%s %s：%s", alert.date,
+                            alert.symbol, alert.message)
 
-        # 4. 记录当日快照
-        market_value = sum(q * last_close[s]
+        # 5. 记录当日快照
+        market_value = sum(rules_for(s).market_value(s, q)
                            for s, q in portfolio.positions.items())
         rows.append({
             "date": day,
             "cash": portfolio.cash,
             "market_value": market_value,
+            "margin": sum(portfolio.margins.values()),
             "nav": portfolio.cash + market_value,
             "positions": dict(portfolio.positions),
         })
@@ -104,4 +143,6 @@ def run_backtest(
         daily=pd.DataFrame(rows),
         fills=pd.DataFrame(fill_rows, columns=FILL_COLUMNS),
         rejections=pd.DataFrame(rejection_rows, columns=REJECTION_COLUMNS),
+        alerts=pd.DataFrame([asdict(a)
+                            for a in alerts], columns=ALERT_COLUMNS),
     )

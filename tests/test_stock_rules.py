@@ -23,9 +23,14 @@ class Script(Strategy):
 
     def __init__(self, orders: dict[int, list[Order]]):
         self.orders = orders
+        self.symbols = list(
+            dict.fromkeys(o.symbol for day in orders.values() for o in day))
+
+    def universe(self, day):
+        return self.symbols
 
     def on_bar(self, ctx):
-        return self.orders.get(len(ctx.history), [])
+        return self.orders.get(len(ctx.history(self.symbols[0])), [])
 
 
 def rejections(result):
@@ -39,8 +44,7 @@ def test_sell_on_buy_day_is_rejected_for_t_plus_1_and_succeeds_next_day():
         1: [Order(SYMBOL, Side.BUY, 1000), Order(SYMBOL, Side.SELL)],
         2: [Order(SYMBOL, Side.SELL)],
     })
-    result = run_backtest(feed, strategy, symbol=SYMBOL,
-                          start=D1, end=D3, config=NO_COSTS)
+    result = run_backtest(feed, strategy, start=D1, end=D3, config=NO_COSTS)
 
     assert result.fills[["date", "side", "quantity"]].to_dict("records") == [
         {"date": D2, "side": "buy", "quantity": 1000},
@@ -55,8 +59,7 @@ def test_buy_quantity_rounds_down_to_whole_lots():
     # 指定 1,050 股 → 1,000 股；满仓买入 (100,000 − 11,000) / 11 = 8,090.9 → 8,000 股
     strategy = Script(
         {1: [Order(SYMBOL, Side.BUY, 1050)], 2: [Order(SYMBOL, Side.BUY)]})
-    result = run_backtest(feed, strategy, symbol=SYMBOL,
-                          start=D1, end=D3, config=NO_COSTS)
+    result = run_backtest(feed, strategy, start=D1, end=D3, config=NO_COSTS)
 
     assert result.fills["quantity"].tolist() == [1000, 8000]
 
@@ -73,8 +76,7 @@ def test_buy_skipped_at_limit_up_open_and_sell_skipped_at_limit_down_open():
         2: [Order(SYMBOL, Side.SELL)],
         3: [Order(SYMBOL, Side.BUY, 100)],
     })
-    result = run_backtest(feed, strategy, symbol=SYMBOL,
-                          start=D1, end=D4, config=NO_COSTS)
+    result = run_backtest(feed, strategy, start=D1, end=D4, config=NO_COSTS)
 
     assert len(result.fills) == 1
     assert rejections(result) == [
@@ -100,8 +102,7 @@ def test_price_limit_depends_on_board_st_and_chinext_reform_date(symbol, fill_da
         signal_day = fill_day - timedelta(days=1)
         feed = make_feed(symbol, {signal_day: make_bar(
             10, is_st=is_st), fill_day: make_bar(open_price, is_st=is_st)})
-        return run_backtest(feed, Script({1: [Order(symbol, Side.BUY, 100)]}), symbol=symbol,
-                            start=signal_day, end=fill_day, config=NO_COSTS)
+        return run_backtest(feed, Script({1: [Order(symbol, Side.BUY, 100)]}), start=signal_day, end=fill_day, config=NO_COSTS)
 
     assert rejections(run(limit_up)) == [
         {"date": fill_day, "side": "buy", "reason": "涨停"}]
@@ -112,8 +113,7 @@ def test_orders_do_not_fill_on_suspended_day():
     feed = make_feed(SYMBOL, {D1: (10, 10), D2: make_bar(
         10, suspended=True), D3: (10, 10)})
     strategy = Script({1: [Order(SYMBOL, Side.BUY, 1000)]})
-    result = run_backtest(feed, strategy, symbol=SYMBOL,
-                          start=D1, end=D3, config=NO_COSTS)
+    result = run_backtest(feed, strategy, start=D1, end=D3, config=NO_COSTS)
 
     assert result.fills.empty
     assert rejections(result) == [{"date": D2, "side": "buy", "reason": "停牌"}]
@@ -131,8 +131,7 @@ def test_default_fees_with_minimum_commission_and_stamp_duty_on_sells_only(quant
         {1: [Order(SYMBOL, Side.BUY, quantity)], 2: [Order(SYMBOL, Side.SELL)]})
     config = BacktestConfig(initial_cash=1_000_000,
                             cash_rate=0.0, stock=StockConfig(slippage=0.0))
-    result = run_backtest(feed, strategy, symbol=SYMBOL,
-                          start=D1, end=D3, config=config)
+    result = run_backtest(feed, strategy, start=D1, end=D3, config=config)
 
     assert result.fills["fee"].tolist() == pytest.approx([buy_fee, sell_fee])
     assert result.daily["cash"].iloc[-1] == pytest.approx(
@@ -145,8 +144,7 @@ def test_slippage_is_adverse_for_both_buys_and_sells():
                       2: [Order(SYMBOL, Side.SELL)]})
     config = BacktestConfig(initial_cash=100_000,
                             cash_rate=0.0, stock=stock_costs(slippage=0.001))
-    result = run_backtest(feed, strategy, symbol=SYMBOL,
-                          start=D1, end=D3, config=config)
+    result = run_backtest(feed, strategy, start=D1, end=D3, config=config)
 
     # 开盘都是 10：买入成交于 10.01，卖出成交于 9.99，一买一卖亏掉 1,000 × 0.02
     assert result.fills["price"].tolist() == pytest.approx([10.01, 9.99])
@@ -165,8 +163,7 @@ def test_buy_beyond_cash_is_rejected_and_cash_never_goes_negative():
     })
     config = BacktestConfig(initial_cash=100_000, cash_rate=0.0,
                             stock=stock_costs(commission_rate=0.00025, min_commission=5.0))
-    result = run_backtest(feed, strategy, symbol=SYMBOL,
-                          start=D1, end=D4, config=config)
+    result = run_backtest(feed, strategy, start=D1, end=D4, config=config)
 
     assert result.fills["quantity"].tolist() == [9900]
     assert rejections(result) == [
@@ -180,8 +177,7 @@ def test_every_unfilled_order_has_a_reason_including_odd_lot_and_no_position():
     feed = make_feed(SYMBOL, {D1: (10, 10), D2: (10, 10)})
     strategy = Script(
         {1: [Order(SYMBOL, Side.BUY, 50), Order(SYMBOL, Side.SELL)]})
-    result = run_backtest(feed, strategy, symbol=SYMBOL,
-                          start=D1, end=D2, config=NO_COSTS)
+    result = run_backtest(feed, strategy, start=D1, end=D2, config=NO_COSTS)
 
     assert result.fills.empty
     assert rejections(result) == [
@@ -194,8 +190,7 @@ def test_ex_rights_day_fills_at_unadjusted_open_and_rounds_lots_on_unadjusted_pr
     # 第 2 日除权（每 10 股送 10 股，因子 1 → 2）：不复权开盘 5，后复权开盘 10
     # 满仓买入按不复权价 5 计：100,000 / 5 = 20,000 股（若按后复权价只有 10,000 股）
     feed = make_feed(SYMBOL, {D1: (10, 10), D2: make_bar(5, 5, adj_factor=2.0)})
-    result = run_backtest(feed, Script({1: [Order(SYMBOL, Side.BUY)]}), symbol=SYMBOL,
-                          start=D1, end=D2, config=NO_COSTS)
+    result = run_backtest(feed, Script({1: [Order(SYMBOL, Side.BUY)]}), start=D1, end=D2, config=NO_COSTS)
     assert result.fills[["date", "quantity", "price"]].to_dict("records") == [
         {"date": D2, "quantity": 20_000, "price": 5.0}]
 
@@ -212,6 +207,5 @@ def test_ex_rights_day_price_limits_use_ex_rights_reference_price(open_price, si
         D1: (10, 10), D2: (10, 10), D3: make_bar(open_price, open_price, adj_factor=2.0)})
     orders = {1: [Order(SYMBOL, Side.BUY, 1000)]} if side is Side.SELL else {}
     orders[2] = [Order(SYMBOL, side, 1000)]
-    result = run_backtest(feed, Script(orders), symbol=SYMBOL,
-                          start=D1, end=D3, config=NO_COSTS)
+    result = run_backtest(feed, Script(orders), start=D1, end=D3, config=NO_COSTS)
     assert (D3 in set(result.fills["date"])) is filled

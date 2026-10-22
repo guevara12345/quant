@@ -26,6 +26,7 @@ class Bar:
         suspended: 当日是否停牌。停牌日仍会返回 Bar（suspended=True），
             「无数据」才表现为 bar() 返回 None。
         is_st: 当日是否为 ST 股。
+        settle: 结算价，只有期货有（盯市用，不等于收盘价）；其余品种为 None。
     """
 
     open: float
@@ -36,6 +37,7 @@ class Bar:
     adj_factor: float
     suspended: bool
     is_st: bool
+    settle: float | None = None
 
 
 class DataFeed(Protocol):

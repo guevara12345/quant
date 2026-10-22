@@ -1,4 +1,6 @@
 baostock
+akshare
+requests
 pandas
 numpy
 scipy

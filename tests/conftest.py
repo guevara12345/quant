@@ -3,6 +3,7 @@ from datetime import date
 import pytest
 
 from quant.data.feed import Bar, InMemoryDataFeed
+from quant.instruments.future import FutureConfig
 from quant.instruments.stock import StockConfig
 
 
@@ -47,3 +48,23 @@ def make_feed(symbol: str, prices: dict[date, tuple[float, float] | Bar]) -> InM
     bars = {day: p if isinstance(p, Bar) else make_bar(*p)
             for day, p in prices.items()}
     return InMemoryDataFeed(calendar=sorted(prices), bars={symbol: bars})
+
+
+def make_future_bar(close: float, settle: float | None = None) -> Bar:
+    """期货 bar：开高低收都等于收盘价，结算价默认等于收盘价。"""
+    return Bar(open=close, high=close, low=close, close=close, adj_close=close, adj_factor=1.0,
+               suspended=False, is_st=False, settle=close if settle is None else settle)
+
+
+def future_costs(**overrides: float) -> FutureConfig:
+    """手续费、滑点全为 0 的期货配置，只打开 overrides 指定的项。"""
+    zero = dict(open_fee_rate=0.0, close_yesterday_fee_rate=0.0,
+                close_today_fee_rate=0.0, slippage_points=0.0)
+    return FutureConfig(**{**zero, **overrides})  # type: ignore[arg-type]
+
+
+def make_multi_feed(bars: dict[str, dict[date, Bar]], calendar: list[date] | None = None) -> InMemoryDataFeed:
+    """多品种 feed；交易日历默认为所有 bar 日期的并集。"""
+    days = calendar if calendar is not None else sorted(
+        {d for by_day in bars.values() for d in by_day})
+    return InMemoryDataFeed(calendar=days, bars=bars)

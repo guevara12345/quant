@@ -13,7 +13,7 @@ from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
 from quant.data.feed import Bar
-from quant.portfolio import Fill, Portfolio, RejectReason, Rejection
+from quant.portfolio import Alert, Fill, Portfolio, RejectReason, Rejection
 from quant.strategy import Order, Side
 
 # 按代码前缀判断板块（代码形如 sz.300750，取点号后的部分）
@@ -38,8 +38,15 @@ class StockConfig:
 
 
 class StockRules:
+    """股票的品种规则（InstrumentRules）。按品种记录涨跌停基准价与复权因子，每次回测新建一个实例。"""
+
+    fills_at_close = False  # 订单进 pending，次一交易日开盘撮合
+
     def __init__(self, config: StockConfig):
         self.config = config
+        # 涨跌停基准：上一个有 bar 的交易日的不复权收盘价，除权日替换为除权参考价
+        self._ref_price: dict[str, float] = {}
+        self._last_factor: dict[str, float] = {}
 
     def limit_ratio(self, symbol: str, day: date, is_st: bool) -> float:
         """当日涨跌幅限制：按板块、是否 ST、创业板改革日期决定。"""
@@ -61,6 +68,14 @@ class StockRules:
             fee += amount * c.stamp_duty_rate
         return fee
 
+    def before_open(self, symbol: str, day: date, bar: Bar, portfolio: Portfolio) -> None:
+        """开盘前：复权因子较上一个有 bar 的交易日变化时做除权调整。"""
+        prev_factor = self._last_factor.get(symbol)
+        if prev_factor is not None and bar.adj_factor != prev_factor:
+            self._ref_price[symbol] = self.apply_ex_rights(
+                symbol, bar.adj_factor / prev_factor, self._ref_price[symbol], portfolio)
+        self._last_factor[symbol] = bar.adj_factor
+
     def apply_ex_rights(self, symbol: str, ratio: float, prev_close: float, portfolio: Portfolio) -> float:
         """除权日开盘前调用；ratio = 当日复权因子 / 前一日复权因子。
 
@@ -72,6 +87,23 @@ class StockRules:
         if held:
             portfolio.adjust_position(symbol, round(held * ratio))
         return _to_cent(prev_close / ratio)
+
+    def match(self, order: Order, day: date, bar: Bar, portfolio: Portfolio) -> Fill | Rejection:
+        return self.match_at_open(order, day, bar, self._ref_price.get(order.symbol), portfolio)
+
+    def apply(self, fill: Fill, portfolio: Portfolio) -> None:
+        portfolio.apply(fill)
+
+    def after_close(
+        self, symbol: str, day: date, bar: Bar | None, portfolio: Portfolio,
+    ) -> tuple[list[Fill], list[Alert]]:
+        """收盘后记录收盘价，作为估值价和下一交易日的涨跌停基准。"""
+        if bar is not None:
+            self._ref_price[symbol] = bar.close
+        return [], []
+
+    def market_value(self, symbol: str, quantity: int) -> float:
+        return quantity * self._ref_price[symbol]
 
     def match_at_open(
         self, order: Order, day: date, bar: Bar, prev_close: float | None, portfolio: Portfolio,

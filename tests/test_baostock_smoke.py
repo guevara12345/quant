@@ -25,8 +25,14 @@ def test_baostock_feed_loads_moutai(tmp_path):
 
 
 class BuyAndHold(Strategy):
+    def __init__(self, symbol: str):
+        self.symbol = symbol
+
+    def universe(self, day):
+        return [self.symbol]
+
     def on_bar(self, ctx):
-        return [Order(ctx.symbol, Side.BUY)] if len(ctx.history) == 1 else []
+        return [Order(self.symbol, Side.BUY)] if len(ctx.history(self.symbol)) == 1 else []
 
 
 @pytest.mark.network
@@ -36,7 +42,7 @@ def test_moutai_buy_and_hold_tracks_backward_adjusted_return_across_ex_rights_da
     symbol, start, end = "sh.600519", date(2016, 1, 1), date(2024, 12, 31)
     feed = load_baostock_feed([symbol], start, end, tmp_path)
     config = BacktestConfig(initial_cash=3_000_000, cash_rate=0.0, stock=stock_costs())
-    result = run_backtest(feed, BuyAndHold(), symbol=symbol, start=start, end=end, config=config)
+    result = run_backtest(feed, BuyAndHold(symbol), start=start, end=end, config=config)
 
     daily = result.daily.set_index("date")
     bought = result.fills.iloc[0]["date"]

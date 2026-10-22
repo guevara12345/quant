@@ -2,28 +2,35 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from quant.strategy import Context, Order, Side, Strategy
 
 
 class MaCross(Strategy):
-    def __init__(self, fast: int = 5, slow: int = 20):
+    def __init__(self, symbol: str, fast: int = 5, slow: int = 20):
         if not 0 < fast < slow:
             raise ValueError(f"需要 0 < fast < slow，实际 fast={fast}, slow={slow}")
+        self.symbol = symbol
         self.fast = fast
         self.slow = slow
 
+    def universe(self, day: date) -> list[str]:
+        return [self.symbol]
+
     def on_bar(self, ctx: Context) -> list[Order]:
-        prices = [bar.adj_close for _, bar in ctx.history[-(self.slow + 1):]]
+        prices = [bar.adj_close for _, bar in ctx.history(
+            self.symbol)[-(self.slow + 1):]]
         if len(prices) < self.slow + 1:
             return []
         today = _mean(prices[-self.fast:]) - _mean(prices[-self.slow:])
         yesterday = _mean(prices[-self.fast - 1:-1]) - \
             _mean(prices[-self.slow - 1:-1])
-        held = ctx.positions.get(ctx.symbol, 0)
+        held = ctx.positions.get(self.symbol, 0)
         if yesterday <= 0 < today and held == 0:
-            return [Order(ctx.symbol, Side.BUY)]
+            return [Order(self.symbol, Side.BUY)]
         if yesterday >= 0 > today and held > 0:
-            return [Order(ctx.symbol, Side.SELL)]
+            return [Order(self.symbol, Side.SELL)]
         return []
 
 

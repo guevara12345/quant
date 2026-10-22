@@ -13,8 +13,11 @@ SYMBOL = "sh.600000"
 
 
 class BuyAtLimitUp(Strategy):
+    def universe(self, day):
+        return [SYMBOL]
+
     def on_bar(self, ctx):
-        return [Order(SYMBOL, Side.BUY, 100)] if len(ctx.history) == 1 else []
+        return [Order(SYMBOL, Side.BUY, 100)] if len(ctx.history(SYMBOL)) == 1 else []
 
 
 def test_report_lists_skipped_orders_with_reasons(tmp_path):
@@ -23,8 +26,7 @@ def test_report_lists_skipped_orders_with_reasons(tmp_path):
                      days[1]: (11, 11)})  # 第 2 日开盘涨停
     config = BacktestConfig(initial_cash=100_000,
                             cash_rate=0.0, stock=stock_costs())
-    result = run_backtest(feed, BuyAtLimitUp(), symbol=SYMBOL,
-                          start=days[0], end=days[1], config=config)
+    result = run_backtest(feed, BuyAtLimitUp(), start=days[0], end=days[1], config=config)
     write_report(tmp_path, "t", result, buy_and_hold_nav(feed, SYMBOL, days, 100_000),
                  compute_metrics(result, feed, SYMBOL))
 

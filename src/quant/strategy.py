@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 
@@ -17,7 +18,7 @@ class Side(str, Enum):
 
 @dataclass(frozen=True)
 class Order:
-    """quantity 为 None 时：买入表示满仓买入，卖出表示全部卖出，具体股数在成交时确定。"""
+    """quantity 为 None 时：买入表示满仓买入，卖出表示全部卖出，具体数量在成交时确定。"""
 
     symbol: str
     side: Side
@@ -30,19 +31,33 @@ class Order:
 
 @dataclass(frozen=True)
 class Context:
-    """策略在信号日收盘时能看到的全部信息；history 只包含截至当日（含）的 bar，不含未来数据。"""
+    """策略在信号日收盘时能看到的全部信息，不含未来数据。
+
+    bars 是当日 universe 内各品种的 bar（无数据的品种不在其中）；history(symbol) 只包含截至当日（含）的 bar。
+    交易日历是事先公布的公开信息，可以查询未来日期（trading_days），用于计算到期前的交易日数。
+    """
 
     day: date
-    symbol: str
-    history: list[tuple[date, Bar]]
     cash: float
     positions: dict[str, int]
+    bars: dict[str, Bar]
+    _history: dict[str, list[tuple[date, Bar]]] = field(repr=False)
+    _trading_days: Callable[[date, date], list[date]] = field(repr=False)
 
-    @property
-    def bar(self) -> Bar:
-        return self.history[-1][1]
+    def bar(self, symbol: str) -> Bar | None:
+        return self.bars.get(symbol)
+
+    def history(self, symbol: str) -> list[tuple[date, Bar]]:
+        return list(self._history.get(symbol, []))
+
+    def trading_days(self, start: date, end: date) -> list[date]:
+        return self._trading_days(start, end)
 
 
 class Strategy(ABC):
+    @abstractmethod
+    def universe(self, day: date) -> list[str]:
+        """当日需要行情的品种；引擎另外会带上持仓中的品种。"""
+
     @abstractmethod
     def on_bar(self, ctx: Context) -> list[Order]: ...

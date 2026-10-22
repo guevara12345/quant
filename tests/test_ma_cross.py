@@ -26,8 +26,7 @@ def test_golden_cross_buys_and_death_cross_sells_on_next_day_open():
         date(2024, 1, 10): (12, 8),
         date(2024, 1, 11): (8.5, 8.5),
     })
-    result = run_backtest(feed, MaCross(fast=2, slow=3), symbol=SYMBOL,
-                          start=date(2024, 1, 2), end=date(2024, 1, 11), config=NO_COSTS)
+    result = run_backtest(feed, MaCross(SYMBOL, fast=2, slow=3), start=date(2024, 1, 2), end=date(2024, 1, 11), config=NO_COSTS)
 
     fills = result.fills[["date", "side",
                           "quantity", "price"]].to_dict("records")
@@ -53,8 +52,7 @@ def test_ex_rights_gap_does_not_trigger_death_cross_because_signal_uses_adjusted
         date(2024, 1, 10): make_bar(6, 6, adj_factor=2.0),
         date(2024, 1, 11): make_bar(6.1, 6.1, adj_factor=2.0),
     })
-    result = run_backtest(feed, MaCross(fast=2, slow=3), symbol=SYMBOL,
-                          start=date(2024, 1, 2), end=date(2024, 1, 11), config=NO_COSTS)
+    result = run_backtest(feed, MaCross(SYMBOL, fast=2, slow=3), start=date(2024, 1, 2), end=date(2024, 1, 11), config=NO_COSTS)
 
     assert list(result.fills["side"]) == ["buy"]
     assert result.daily["positions"].iloc[-1] == {SYMBOL: 18_000}

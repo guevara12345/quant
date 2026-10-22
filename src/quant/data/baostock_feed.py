@@ -22,6 +22,14 @@ ADJUST_NONE = "3"  # baostock adjustflag：1 后复权，2 前复权，3 不复�
 ADJUST_BACKWARD = "1"
 
 
+def load_trade_calendar(start: date, end: date, cache_dir: Path) -> list[date]:
+    """[start, end] 内已发布的 A 股交易日（中金所与沪深交易所同一套日历）。"""
+    cache = ParquetCache(cache_dir / "baostock")
+    with _session() as source:
+        calendar = cache.get("trade_dates", start, end, source.trade_dates)
+    return calendar.loc[calendar["is_trading_day"], "date"].tolist()
+
+
 def load_baostock_feed(symbols: list[str], start: date, end: date, cache_dir: Path) -> InMemoryDataFeed:
     cache = ParquetCache(cache_dir / "baostock")
     with _session() as source:

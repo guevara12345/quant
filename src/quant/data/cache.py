@@ -31,8 +31,12 @@ class ParquetCache:
         self.root.mkdir(parents=True, exist_ok=True)
         self._coverage_file = root / "coverage.json"
 
-    def get(self, key: str, start: date, end: date, fetch: Fetcher) -> pd.DataFrame:
-        """返回 [start, end] 内的数据；缓存未覆盖的区间调用 fetch 补拉。补拉失败时若已有缓存则降级使用缓存。"""
+    def get(self, key: str, start: date, end: date, fetch: Fetcher,
+            unique_by: tuple[str, ...] = ("date",)) -> pd.DataFrame:
+        """返回 [start, end] 内的数据；缓存未覆盖的区间调用 fetch 补拉。补拉失败时若已有缓存则降级使用缓存。
+
+        unique_by：合并新旧数据时判定重复行的列；一天多行的表（如多个期货合约）传 ("date", "symbol")。
+        """
         cached = self._read(key)
         coverage = self._coverage().get(key)
         missing = [(a, b) for a, b in _missing_ranges(
@@ -47,7 +51,7 @@ class ParquetCache:
             else:
                 frames = [f for f in [cached, *fetched]
                           if f is not None and not f.empty]
-                merged = (pd.concat(frames).drop_duplicates("date", keep="last").sort_values("date")
+                merged = (pd.concat(frames).drop_duplicates(list(unique_by), keep="last").sort_values(list(unique_by))
                           if frames else pd.DataFrame(columns=["date"]))
                 self._write(key, merged)
                 lo = min(start, date.fromisoformat(
@@ -60,6 +64,24 @@ class ParquetCache:
         if cached is None:
             raise ValueError(f"{key} 在 {start} 至 {end} 内还没有已发布的数据")
         return cached[(cached["date"] >= start) & (cached["date"] <= end)].reset_index(drop=True)
+
+    def get_by_month(self, key: str, start: date, end: date, fetch: Fetcher,
+                     unique_by: tuple[str, ...] = ("date",)) -> pd.DataFrame:
+        """按自然月分段调用 get，每段补拉完即写盘并推进覆盖区间，显示进度。
+
+        首次拉取被中断（如 Ctrl+C）后再次运行，从尚未完成的月份继续。
+        """
+        months = _month_ranges(start, min(end, self.published_through))
+
+        def logged(i: int) -> Fetcher:
+            def fetch_month(a: date, b: date) -> pd.DataFrame:
+                log.info("拉取 %s %s 至 %s（%d/%d）", key, a, b, i + 1, len(months))
+                return fetch(a, b)
+            return fetch_month
+
+        for i, (a, b) in enumerate(months):
+            self.get(key, a, b, logged(i), unique_by)
+        return self.get(key, start, end, fetch, unique_by)
 
     def _path(self, key: str) -> Path:
         return self.root / f"{key}.parquet"
@@ -97,3 +119,15 @@ def _missing_ranges(start: date, end: date, coverage: list[str] | None) -> list[
     if end > hi:
         missing.append((hi + timedelta(days=1), end))
     return missing
+
+
+def _month_ranges(start: date, end: date) -> list[tuple[date, date]]:
+    """把 [start, end] 切成按自然月的闭区间。"""
+    ranges = []
+    a = start
+    while a <= end:
+        next_month = date(a.year + a.month // 12, a.month % 12 + 1, 1)
+        b = min(end, next_month - timedelta(days=1))
+        ranges.append((a, b))
+        a = next_month
+    return ranges
