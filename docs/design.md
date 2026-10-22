@@ -1,9 +1,9 @@
 # 设计文档：A 股量化研究原型
 
-> **状态**：ticket 01（骨架 + 双均线）已落地；02–06 待实现。
+> **状态**：ticket 01（骨架 + 双均线）、02（A 股撮合规则）已落地；03–06 待实现。
 > **需求来源**：`.scratch/a-share-quant-prototype/spec.md`；**术语**以 [`GLOSSARY.md`](../GLOSSARY.md) 为准；**决策**见 [`docs/adr/`](adr/)。
 > **现有代码导读**：[`code-walkthrough.md`](code-walkthrough.md)。
-> 本文说明系统的设计原则与目标形态，以及 02–06 要把代码演进成什么样。凡是尚未实现的内容都标注「目标」。
+> 本文说明系统的设计原则与目标形态，以及 03–06 要把代码演进成什么样。凡是尚未实现的内容都标注「目标」。
 >
 > 文中的图使用 Mermaid，在 GitHub、VS Code（Markdown Preview Mermaid Support 插件）、Typora 中都能直接渲染。
 
@@ -33,25 +33,24 @@
 
 ## 2. 现状与差距
 
-ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易日推进的引擎、策略接口、双均线、指标与报告、命令行入口。代码如何运转见 [`code-walkthrough.md`](code-walkthrough.md)。
+ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易日推进的引擎、策略接口、双均线、指标与报告、命令行入口；ticket 02 补上了 A 股撮合规则（T+1、整手、涨跌停、停牌、完整费用、滑点、资金检查）和未成交记录。代码如何运转见 [`code-walkthrough.md`](code-walkthrough.md)。
 
 | 模块 | 现状 | 目标 |
 | --- | --- | --- |
 | `data/feed.py`、`data/cache.py`、`data/baostock_feed.py` | 已实现 | `Bar` 增加 `settle`（04） |
 | `data/akshare_feed.py` | — | IC 分合约、中证 500、510500（04、05） |
-| `portfolio.py` | 现金 + 股数 | `Position`（可卖数量、平今）、保证金占用（02、04） |
-| `instruments/stock.py` | 开盘价成交、只收佣金 | 完整 A 股规则（02、03） |
+| `portfolio.py` | 现金 + 股数 + 当日买入（可卖数量）；`Rejection` | 保证金占用、平今（04） |
+| `instruments/stock.py` | 完整 A 股撮合规则（含板块涨跌幅） | 除权调整（03） |
 | `instruments/future.py`、`instruments/option.py` | — | 04、05 |
-| `calendars.py`、`pricing.py` | — | 到期日、行权价网格、板块涨跌幅；BS 模型价与 delta（02、04、05） |
+| `calendars.py`、`pricing.py` | — | 到期日、行权价网格；BS 模型价与 delta（04、05） |
 | `engine.py` | 单标的、撮合规则写死为股票 | 多标的、按品种分派、完整每日事件顺序（03、04） |
 | `strategy.py` | 单标的 `Context` | 多标的 `Context`（04） |
 | `strategies/roll_ic.py` | — | 04、06 |
-| `metrics.py`、`report.py` | 单策略 vs 买入持有 | 未成交记录、三条曲线、收益拆解、分段指标（02、04、06） |
+| `metrics.py`、`report.py` | 单策略 vs 买入持有；`rejections.csv` | 三条曲线、收益拆解、分段指标（04、06） |
 
 与目标相比最关键的差距：
 
 - 引擎只能处理一个标的，撮合规则写死为 `StockRules`，尚未达到 ADR-0001 的「按品种分派」。
-- 未成交订单被静默丢弃，没有 `Rejection` 记录；指定数量的买单不检查资金。
 - 没有除权调整，持仓跨除权日时策略净值与后复权基准会出现偏差。
 
 ## 3. 设计原则
@@ -128,19 +127,17 @@ classDiagram
         SUSPENDED 停牌
         T_PLUS_1
         INSUFFICIENT_CASH 资金不足
+        ODD_LOT 不足整手
+        NO_POSITION 无持仓
     }
     Rejection --> RejectReason
 
-    class Position {
-        +int quantity
-        +int opened_today  T+1 / 平今
-    }
     class Portfolio {
         +float cash
-        +dict~str, Position~ positions
-        +float margin  保证金占用（只记录）
+        +dict~str, int~ positions
+        +sellable(symbol, day) int  T+1：持股 − 当日买入
+        +float margin  保证金占用（只记录，04）
     }
-    Portfolio o-- Position
 
     class BacktestConfig {
         +StockConfig stock
@@ -199,10 +196,13 @@ flowchart TD
 
 | 规则 | 参数 |
 | --- | --- |
-| 板块涨跌幅 | 主板 10%；创业板 2020-08-24 起 20%、之前 10%；科创板 20%；ST 5%（按代码前缀判断板块） |
+| 板块涨跌幅 | 主板 10%；创业板 2020-08-24 起 20%、之前 10%；科创板 20%；ST 5%，只作用于主板和改革前的创业板，改革后的创业板与科创板 ST 股与板块相同（按代码前缀判断板块） |
+| 整手 | 买入向下取整到 100 股；卖出不取整（可卖出零股） |
 | 费用 | 佣金万 2.5（最低 5 元）+ 卖出印花税 0.05% + 过户费 0.001% |
 | 滑点 | 0.1%，方向对交易者不利 |
-| 除权 | 除权日持股 × (当日因子 / 前一日因子)，近似分红再投资 |
+| 除权 | 除权日持股 × (当日因子 / 前一日因子)，近似分红再投资（03） |
+
+02 已按上图实现（`instruments/stock.py`），所有参数在 `StockConfig` 中可配置。图外补充的两种拒单原因：显式数量不足 100 股（不足整手）、卖出时没有持仓（无持仓），保证每笔未成交订单都有原因。被拒的订单不顺延到下一交易日。
 
 ### 6.2 期货（ticket 04）
 
@@ -277,7 +277,7 @@ gantt
 
 | 输出 | 内容 | Ticket |
 | --- | --- | --- |
-| `rejections.csv` | 未成交订单及原因 | 02 |
+| `rejections.csv` | 未成交订单及原因（已实现，终端同时打印按原因计数） | 02 |
 | `daily.csv` 新列 | margin、basis、annualized_discount、net_delta | 04、06 |
 | 净值图 | 滚 IC：本策略、纯滚 IC、中证 500 三条曲线 | 04、06 |
 | 收益拆解 | 贴水收敛、put 成本、交易费用、现金利息，之和 = 总盈亏 | 06 |
@@ -287,19 +287,19 @@ gantt
 
 ```mermaid
 flowchart LR
-    T01["01 骨架 + 双均线<br/>✅ 已完成"] --> T02[02 A 股撮合规则]
+    T01["01 骨架 + 双均线<br/>✅ 已完成"] --> T02["02 A 股撮合规则<br/>✅ 已完成"]
     T01 --> T03[03 除权处理]
     T01 --> T04[04 纯滚 IC]
     T01 --> T05[05 ETF 期权与模型价]
     T04 --> T06[06 滚 IC + put delta 中性]
     T05 --> T06
     classDef done fill:#e8f5e9,stroke:#2e7d32
-    class T01 done
+    class T01,T02 done
 ```
 
 | Ticket | 主要改动模块 | 接口变化 |
 | --- | --- | --- |
-| 02 | `instruments/stock.py`、`calendars.py`、`portfolio.py` | 新增 `Rejection`、`BacktestResult.rejections`；`Position` 区分可卖数量 |
+| 02 ✅ | `instruments/stock.py`、`portfolio.py`、`engine.py`、`report.py` | 新增 `Rejection`、`BacktestResult.rejections`；`Portfolio.sellable` 给出可卖数量 |
 | 03 | `engine.py`（除权步骤）、`instruments/stock.py` | 无 |
 | 04 | `akshare_feed.py`、`instruments/future.py`、`calendars.py`、`strategies/roll_ic.py`、`report.py` | `Bar.settle`；引擎多标的化与品种分派；`daily` 增加 margin、basis |
 | 05 | `pricing.py`、`instruments/option.py`、`calendars.py` | 期权估值接入净值 |
@@ -313,5 +313,6 @@ flowchart LR
 - 期权模型价不含波动率曲面和买卖价差，对冲成本可能被高估或低估；2022-09 之前的 put 完全是假设品种（ADR-0002）。
 - 只记录保证金占用，不模拟追保与强平。
 - 除权处理是分红再投资的近似。
+- 涨跌停价以前一交易日不复权收盘价为基准，除权日未改用除权参考价；新股上市初期无涨跌幅、北交所 30% 等规则未建模。
 - 缓存覆盖区间是单一连续区间，数据源中间缺失的日期不会被自动发现。
 - 预期 delta 中性方案的结果可能为负——这是原型要回答的问题，不是缺陷。

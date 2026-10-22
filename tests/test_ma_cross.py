@@ -1,21 +1,20 @@
 from datetime import date
 
 from quant.engine import BacktestConfig, run_backtest
-from quant.instruments.stock import StockConfig
 from quant.strategies.ma_cross import MaCross
 
-from .conftest import make_feed
+from .conftest import make_feed, stock_costs
 
 SYMBOL = "sh.600519"
-NO_COSTS = BacktestConfig(initial_cash=100_000, cash_rate=0.0,
-                          stock=StockConfig(commission_rate=0.0, min_commission=0.0))
+NO_COSTS = BacktestConfig(initial_cash=100_000,
+                          cash_rate=0.0, stock=stock_costs())
 
 
 def test_golden_cross_buys_and_death_cross_sells_on_next_day_open():
     # MA2 / MA3（按收盘价）：
     # 01-02..01-04 均为 10，均线相等，无信号
     # 01-05 收 9：MA2 9.5 < MA3 9.67（下穿，但空仓，不卖）
-    # 01-08 收 12：MA2 10.5 > MA3 10.33，金叉 → 01-09 开盘 11 买入
+    # 01-08 收 12：MA2 10.5 > MA3 10.33，金叉 → 01-09 开盘 11 买入 9,000 股（100,000 / 11 = 9,090.9，按整手取整）
     # 01-10 收 8：MA2 10 < MA3 10.67，死叉 → 01-11 开盘 8.5 卖出
     feed = make_feed(SYMBOL, {
         date(2024, 1, 2): (10, 10),
@@ -30,8 +29,11 @@ def test_golden_cross_buys_and_death_cross_sells_on_next_day_open():
     result = run_backtest(feed, MaCross(fast=2, slow=3), symbol=SYMBOL,
                           start=date(2024, 1, 2), end=date(2024, 1, 11), config=NO_COSTS)
 
-    fills = result.fills[["date", "side", "quantity", "price"]].to_dict("records")
+    fills = result.fills[["date", "side",
+                          "quantity", "price"]].to_dict("records")
     assert fills == [
-        {"date": date(2024, 1, 9), "side": "buy", "quantity": 9090, "price": 11.0},
-        {"date": date(2024, 1, 11), "side": "sell", "quantity": 9090, "price": 8.5},
+        {"date": date(2024, 1, 9), "side": "buy",
+         "quantity": 9000, "price": 11.0},
+        {"date": date(2024, 1, 11), "side": "sell",
+         "quantity": 9000, "price": 8.5},
     ]

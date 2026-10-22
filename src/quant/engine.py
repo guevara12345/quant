@@ -9,10 +9,11 @@ import pandas as pd
 
 from quant.data.feed import Bar, DataFeed
 from quant.instruments.stock import StockConfig, StockRules
-from quant.portfolio import Fill, Portfolio
+from quant.portfolio import Fill, Portfolio, Rejection
 from quant.strategy import Context, Order, Strategy
 
 FILL_COLUMNS = ["date", "symbol", "side", "quantity", "price", "fee"]
+REJECTION_COLUMNS = ["date", "symbol", "side", "quantity", "reason"]
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class BacktestConfig:
 class BacktestResult:
     daily: pd.DataFrame  # date, cash, market_value, nav, positions
     fills: pd.DataFrame  # FILL_COLUMNS
+    rejections: pd.DataFrame  # REJECTION_COLUMNS，未成交订单及原因
 
 
 def run_backtest(
@@ -42,6 +44,7 @@ def run_backtest(
     last_close: dict[str, float] = {}
     pending: list[Order] = []
     fills: list[Fill] = []
+    rejections: list[Rejection] = []
     rows = []
     prev_day: date | None = None
 
@@ -56,10 +59,13 @@ def run_backtest(
         # 1. 撮合上一交易日收盘产生的股票订单（开盘价）
         if bar is not None:
             for order in pending:
-                fill = rules.match_at_open(order, day, bar, portfolio)
-                if fill is not None:
-                    portfolio.apply(fill)
-                    fills.append(fill)
+                outcome = rules.match_at_open(
+                    order, day, bar, last_close.get(symbol), portfolio)
+                if isinstance(outcome, Fill):
+                    portfolio.apply(outcome)
+                    fills.append(outcome)
+                else:
+                    rejections.append(outcome)
             pending = []
             history.append((day, bar))
             last_close[symbol] = bar.close
@@ -82,4 +88,10 @@ def run_backtest(
         })
 
     fill_rows = [{**asdict(f), "side": f.side.value} for f in fills]
-    return BacktestResult(daily=pd.DataFrame(rows), fills=pd.DataFrame(fill_rows, columns=FILL_COLUMNS))
+    rejection_rows = [
+        {**asdict(r), "side": r.side.value, "reason": r.reason.value} for r in rejections]
+    return BacktestResult(
+        daily=pd.DataFrame(rows),
+        fills=pd.DataFrame(fill_rows, columns=FILL_COLUMNS),
+        rejections=pd.DataFrame(rejection_rows, columns=REJECTION_COLUMNS),
+    )

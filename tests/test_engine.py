@@ -3,10 +3,9 @@ from datetime import date
 import pytest
 
 from quant.engine import BacktestConfig, run_backtest
-from quant.instruments.stock import StockConfig
 from quant.strategy import Order, Side, Strategy
 
-from .conftest import make_feed
+from .conftest import make_feed, stock_costs
 
 SYMBOL = "sh.600000"
 
@@ -47,7 +46,8 @@ def test_idle_cash_earns_annual_rate_per_calendar_day():
         feed, DoNothing(), symbol=SYMBOL, start=date(2024, 1, 5), end=date(2024, 1, 9),
         config=BacktestConfig(initial_cash=1_000_000, cash_rate=0.015),
     )
-    assert list(result.daily["nav"]) == pytest.approx([1_000_000, 1_000_123.2877, 1_000_164.3886])
+    assert list(result.daily["nav"]) == pytest.approx(
+        [1_000_000, 1_000_123.2877, 1_000_164.3886])
 
 
 class BuyOnceOnFirstDay(Strategy):
@@ -60,7 +60,8 @@ class BuyOnceOnFirstDay(Strategy):
         return []
 
 
-NO_COSTS = BacktestConfig(initial_cash=100_000, cash_rate=0.0, stock=StockConfig(commission_rate=0.0, min_commission=0.0))
+NO_COSTS = BacktestConfig(initial_cash=100_000,
+                          cash_rate=0.0, stock=stock_costs())
 
 
 def test_stock_order_signalled_at_close_fills_at_next_day_open():
@@ -83,18 +84,18 @@ def test_stock_order_signalled_at_close_fills_at_next_day_open():
 
 
 WITH_COMMISSION = BacktestConfig(initial_cash=100_000, cash_rate=0.0,
-                                 stock=StockConfig(commission_rate=0.00025, min_commission=5.0))
+                                 stock=stock_costs(commission_rate=0.00025, min_commission=5.0))
 TWO_DAYS = {date(2024, 1, 2): (10, 10), date(2024, 1, 3): (10, 10)}
 
 
-def test_full_position_buy_spends_as_much_cash_as_commission_allows():
-    # 9997 股 × 10 = 99,970，佣金 99,970 × 万 2.5 = 24.9925，合计 99,994.99；再多 1 股就超出现金
+def test_full_position_buy_takes_as_many_whole_lots_as_cash_and_commission_allow():
+    # 10,000 股需要 100,000 + 佣金 25，超出现金；退到 9,900 股 × 10 = 99,000，佣金 24.75
     result = run_backtest(make_feed(SYMBOL, TWO_DAYS), BuyOnceOnFirstDay(None), symbol=SYMBOL,
                           start=date(2024, 1, 2), end=date(2024, 1, 3), config=WITH_COMMISSION)
     fill = result.fills.iloc[0]
-    assert fill["quantity"] == 9997
-    assert fill["fee"] == pytest.approx(24.9925)
-    assert result.daily["cash"].iloc[-1] == pytest.approx(5.0075)
+    assert fill["quantity"] == 9900
+    assert fill["fee"] == pytest.approx(24.75)
+    assert result.daily["cash"].iloc[-1] == pytest.approx(975.25)
 
 
 def test_small_trade_pays_minimum_commission():
@@ -122,7 +123,8 @@ def test_sell_without_quantity_closes_whole_position_at_next_open():
     result = run_backtest(feed, BuyThenSellAll(), symbol=SYMBOL,
                           start=date(2024, 1, 2), end=date(2024, 1, 4), config=WITH_COMMISSION)
     sell = result.fills.iloc[-1]
-    assert (sell["side"], sell["quantity"], sell["price"], sell["fee"]) == ("sell", 1000, 12.0, 5.0)
+    assert (sell["side"], sell["quantity"], sell["price"],
+            sell["fee"]) == ("sell", 1000, 12.0, 5.0)
     assert result.daily["positions"].iloc[-1] == {}
     # 100,000 − 10,000 − 5 + 12,000 − 5
     assert result.daily["nav"].iloc[-1] == pytest.approx(101_990)
@@ -130,9 +132,10 @@ def test_sell_without_quantity_closes_whole_position_at_next_open():
 
 def test_interest_for_the_gap_accrues_on_previous_close_cash_before_open_fills():
     # 周五收盘发出买入信号，周一开盘以 10 元买 1000 股：周末 3 天的利息按周五收盘的 100,000 现金计
-    feed = make_feed(SYMBOL, {date(2024, 1, 5): (10, 10), date(2024, 1, 8): (10, 10)})
+    feed = make_feed(SYMBOL, {date(2024, 1, 5): (
+        10, 10), date(2024, 1, 8): (10, 10)})
     config = BacktestConfig(initial_cash=100_000, cash_rate=0.015,
-                            stock=StockConfig(commission_rate=0.0, min_commission=0.0))
+                            stock=stock_costs())
     result = run_backtest(feed, BuyOnceOnFirstDay(1000), symbol=SYMBOL,
                           start=date(2024, 1, 5), end=date(2024, 1, 8), config=config)
     # 100,000 × (1 + 1.5% × 3 / 365) − 10,000

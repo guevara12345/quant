@@ -1,4 +1,4 @@
-"""报告输出：指标文本、净值图（策略 vs 基准）、成交表和每日状态表。"""
+"""报告输出：指标文本、净值图（策略 vs 基准）、成交表、未成交订单表和每日状态表。"""
 
 from __future__ import annotations
 
@@ -44,10 +44,22 @@ def format_metrics(metrics: dict) -> str:
     return "\n".join(lines)
 
 
+def format_rejections(result: BacktestResult) -> str:
+    """未成交订单按原因计数，如「未成交订单 3 笔：涨停 2、停牌 1」。"""
+    rejections = result.rejections
+    if rejections.empty:
+        return "未成交订单 0 笔"
+    counts = "、".join(f"{reason} {n}" for reason,
+                      n in rejections["reason"].value_counts().items())
+    return f"未成交订单 {len(rejections)} 笔：{counts}"
+
+
 def write_report(out_dir: Path, title: str, result: BacktestResult, benchmark: pd.Series, metrics: dict) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     result.fills.to_csv(out_dir / "fills.csv",
                         index=False, encoding="utf-8-sig")
+    result.rejections.to_csv(out_dir / "rejections.csv",
+                             index=False, encoding="utf-8-sig")
     daily = result.daily.copy()
     daily["positions"] = daily["positions"].map(
         lambda p: json.dumps(p, ensure_ascii=False))

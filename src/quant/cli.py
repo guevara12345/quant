@@ -12,7 +12,7 @@ from typing import Any
 from quant.data.baostock_feed import load_baostock_feed
 from quant.engine import BacktestConfig, run_backtest
 from quant.metrics import buy_and_hold_nav, compute_metrics
-from quant.report import format_metrics, write_report
+from quant.report import format_metrics, format_rejections, write_report
 from quant.strategies.ma_cross import MaCross
 
 STRATEGIES = ["ma_cross"]
@@ -56,7 +56,8 @@ def main(argv: list[str] | None = None) -> None:
 
     print(title)
     print(format_metrics(metrics))
-    print(f"\n报告已输出到 {out_dir}（nav.png、fills.csv、daily.csv、metrics.json）")
+    print(format_rejections(result))
+    print(f"\n报告已输出到 {out_dir}（nav.png、fills.csv、rejections.csv、daily.csv、metrics.json）")
 
 
 def apply_overrides(config: BacktestConfig, overrides: list[str]) -> BacktestConfig:
@@ -72,8 +73,12 @@ def _replace_path(obj: Any, path: list[str], value: str) -> Any:
     if not dataclasses.is_dataclass(obj) or name not in {f.name for f in dataclasses.fields(obj)}:
         raise SystemExit(f"未知配置项：{name}")
     current = getattr(obj, name)
-    new = _replace_path(current, path[1:], value) if len(
-        path) > 1 else type(current)(value)
+    if len(path) > 1:
+        new = _replace_path(current, path[1:], value)
+    elif isinstance(current, date):
+        new = date.fromisoformat(value)
+    else:
+        new = type(current)(value)
     return dataclasses.replace(obj, **{name: new})  # type: ignore[type-var]
 
 

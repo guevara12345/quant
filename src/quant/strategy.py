@@ -23,6 +23,10 @@ class Order:
     side: Side
     quantity: int | None = None
 
+    def __post_init__(self) -> None:
+        if self.quantity is not None and self.quantity <= 0:
+            raise ValueError(f"订单数量必须为正数，实际 {self.quantity}")
+
 
 @dataclass(frozen=True)
 class Context:
