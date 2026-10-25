@@ -1,9 +1,9 @@
 # 设计文档：A 股量化研究原型
 
-> **状态**：ticket 01（骨架 + 双均线）、02（A 股撮合规则）、03（除权处理）、04（纯滚 IC）已落地；05–06 待实现。
+> **状态**：ticket 01（骨架 + 双均线）、02（A 股撮合规则）、03（除权处理）、04（纯滚 IC）、05（ETF 期权与模型价）已落地；06 待实现。
 > **需求来源**：`.scratch/a-share-quant-prototype/spec.md`；**术语**以 [`GLOSSARY.md`](../GLOSSARY.md) 为准；**决策**见 [`docs/adr/`](adr/)。
 > **现有代码导读**：[`code-walkthrough.md`](code-walkthrough.md)。
-> 本文说明系统的设计原则与目标形态，以及 05–06 要把代码演进成什么样。凡是尚未实现的内容都标注「目标」。
+> 本文说明系统的设计原则与目标形态，以及 06 要把代码演进成什么样。凡是尚未实现的内容都标注「目标」。
 >
 > 文中的图使用 Mermaid，在 GitHub、VS Code（Markdown Preview Mermaid Support 插件）、Typora 中都能直接渲染。
 
@@ -33,25 +33,25 @@
 
 ## 2. 现状与差距
 
-ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易日推进的引擎、策略接口、双均线、指标与报告、命令行入口；ticket 02 补上了 A 股撮合规则（T+1、整手、涨跌停、停牌、完整费用、滑点、资金检查）和未成交记录；ticket 03 补上了除权处理（持股按复权因子放大、除权日涨跌停以除权参考价为基准）；ticket 04 把引擎改成多标的、按品种分派，加上期货规则、IC 到期日历、中金所与 AKShare 数据适配器和纯滚 IC 策略。代码如何运转见 [`code-walkthrough.md`](code-walkthrough.md)。
+ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易日推进的引擎、策略接口、双均线、指标与报告、命令行入口；ticket 02 补上了 A 股撮合规则（T+1、整手、涨跌停、停牌、完整费用、滑点、资金检查）和未成交记录；ticket 03 补上了除权处理（持股按复权因子放大、除权日涨跌停以除权参考价为基准）；ticket 04 把引擎改成多标的、按品种分派，加上期货规则、IC 到期日历、中金所与 AKShare 数据适配器和纯滚 IC 策略；ticket 05 加上 ETF 期权品种（BS 模型价、到期按内在价值结算）、期权到期日、行权价网格和 510500 数据适配器。代码如何运转见 [`code-walkthrough.md`](code-walkthrough.md)。
 
 | 模块 | 现状 | 目标 |
 | --- | --- | --- |
 | `data/feed.py`、`data/cache.py`、`data/baostock_feed.py` | 已实现；`Bar.settle`；缓存按月分段补拉（断点续拉） | — |
-| `data/cffex_feed.py`、`data/akshare_feed.py` | IC 分合约日线与结算价（中金所月度数据包）、中证 500（AKShare） | 510500（05） |
+| `data/cffex_feed.py`、`data/akshare_feed.py` | IC 分合约日线与结算价（中金所月度数据包）、中证 500 与 510500（AKShare） | — |
 | `portfolio.py` | 现金 + 持仓 + 当日买入（可卖数量 / 平昨数量）；期货盯市基准价与保证金占用；`Rejection`、`Alert` | — |
 | `instruments/stock.py`、`instruments/future.py` | A 股撮合规则；期货收盘成交、盯市、平今平昨、保证金、到期强平 | — |
-| `instruments/option.py` | — | 05 |
-| `calendars.py` | IC 到期日、季月合约、工作日延伸日历 | 期权到期日、行权价网格（05） |
-| `pricing.py` | — | BS 模型价与 delta（05） |
-| `engine.py` | 多标的、按品种分派（`InstrumentRules`）、完整每日事件顺序 | — |
+| `instruments/option.py` | 期权现算模型价行情、收盘成交、每张 2 元、到期按内在价值结算 | — |
+| `calendars.py` | IC 到期日、季月合约、工作日延伸日历、期权到期日、行权价网格 | — |
+| `pricing.py` | BS put 模型价与 delta、已实现波动率 | — |
+| `engine.py` | 多标的、按品种分派（`InstrumentRules`，行情也经规则的 `quote` 取）、完整每日事件顺序 | — |
 | `strategy.py` | 多标的 `Context`、`Strategy.universe` | — |
 | `strategies/roll_ic.py` | 纯滚 IC（`--no-hedge`） | put 对冲（06） |
 | `metrics.py`、`report.py` | 策略 vs 基准；基差与年化贴水率；`rejections.csv`、`alerts.csv` | 三条曲线、收益拆解、分段指标（06） |
 
 与目标相比最关键的差距：
 
-- 期权品种与 BS 模型价（05）、put 对冲与收益拆解（06）尚未实现。
+- put 对冲与收益拆解（06）尚未实现；510500 数据已有适配器，但还没接进 CLI。
 
 ## 3. 设计原则
 
@@ -59,7 +59,7 @@ ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易�
 | --- | --- |
 | 一个引擎、一个账户 | 股票、期货、期权共用 `Portfolio` 现金账户，规则按品种类型分派，引擎不含品种特有逻辑（ADR-0001） |
 | 不引入未来函数 | 策略只看截至信号日的数据；股票次日开盘成交；衍生品当日收盘成交只因其决策不依赖未来行情（ADR-0003） |
-| 唯一测试接缝 | 引擎只通过 `DataFeed` 取数；测试手工构造 bar，只断言回测结果 |
+| 唯一测试接缝 | 引擎只通过 `DataFeed` 取数；测试手工构造 bar，只断言回测结果（例外：缓存断点续拉、策略直接调用的定价纯函数） |
 | 外部依赖集中 | 数据源字段名只出现在对应适配器中 |
 | 参数全部可配置 | 费率、滑点、保证金率、利率都在 frozen dataclass 配置中，`--set` 覆盖 |
 | 离线可重复 | Parquet 缓存，命中时不联网 |
@@ -71,10 +71,12 @@ flowchart TD
     CLI[cli.py] --> Loaders
     subgraph Loaders[数据适配]
         BAO[baostock_feed<br/>股票、交易日历]
-        AK[akshare_feed<br/>IC 分合约、中证 500、510500]
+        AK[akshare_feed<br/>中证 500、510500]
+        CF[cffex_feed<br/>IC 分合约]
     end
     BAO --> Cache[ParquetCache]
     AK --> Cache
+    CF --> Cache
     Loaders --> Feed["InMemoryDataFeed<br/>Bar + settle"]
     Feed --> Engine[engine.run_backtest<br/>多标的]
     Engine --> Dispatch{按品种分派}
@@ -101,10 +103,13 @@ classDiagram
     direction LR
     class InstrumentRules {
         <<Protocol>>
-        +match(order, day, feed, portfolio) Fill | Rejection
-        +mark_to_market(day, feed, portfolio)
-        +handle_expiry(day, feed, portfolio) list~Fill~
-        +market_value(symbol, qty, day, feed) float
+        +bool fills_at_close
+        +quote(symbol, day) Bar | None
+        +before_open(symbol, day, bar, portfolio)
+        +match(order, day, bar, portfolio) Fill | Rejection
+        +apply(fill, portfolio)
+        +after_close(symbol, day, bar, portfolio) (fills, alerts)
+        +market_value(symbol, quantity) float
     }
     class StockRules
     class FutureRules
@@ -142,8 +147,7 @@ classDiagram
     class BacktestConfig {
         +StockConfig stock
         +FutureConfig future
-        +OptionConfig option
-        +PricingConfig pricing
+        +OptionConfig option  含定价参数
     }
 ```
 
@@ -153,7 +157,7 @@ classDiagram
 - `Context` 提供 `bar(symbol)`（当日）、`history(symbol)`（截至当日）和 `trading_days(start, end)`（交易日历是事先公布的公开信息，可查未来日期）。
 - `MaCross` 构造时接收 symbol。
 - `DataFeed` 协议不变。
-- 品种规则实现 `InstrumentRules` 协议（`instruments/__init__.py`）：`fills_at_close`、`before_open`、`match`、`apply`、`after_close`、`market_value`；引擎按代码分派（`IC2412` 这类代码 → `FutureRules`，其余 → `StockRules`）。涨跌停基准价、复权因子等按品种的状态放在规则对象里，每次回测新建。
+- 品种规则实现 `InstrumentRules` 协议（`instruments/__init__.py`）：`fills_at_close`、`quote`（05 新增）、`before_open`、`match`、`apply`、`after_close`、`market_value`；引擎按代码分派（`IC2412` 这类代码 → `FutureRules`，`510500P2412M05500` 这类代码 → `OptionRules`，其余 → `StockRules`）。涨跌停基准价、复权因子等按品种的状态放在规则对象里，每次回测新建。
 
 ## 5. 每日事件顺序
 
@@ -170,7 +174,7 @@ flowchart TD
 
 股票订单进入 `pending` 隔日撮合；衍生品订单在策略返回后当日立即撮合。引擎按订单的品种类型决定路径，策略无需关心。
 
-04 的实现与上图的差别只有一处：现金计息放在每个交易日开头，为上一段间隔（含周末）计息，与「当日末计息」在净值上等价。期权（05）接入后在 F 步按内在价值结算。
+04 的实现与上图的差别只有一处：现金计息放在每个交易日开头，为上一段间隔（含周末）计息，与「当日末计息」在净值上等价。期权（05）在 F 步（`after_close`）按内在价值结算。
 
 ## 6. 品种规则
 
@@ -227,11 +231,15 @@ flowchart LR
 
 ### 6.3 期权（ticket 05）
 
-- 合约乘数 10000，每张 2 元，买方不交保证金。
-- 成交与估值均用 **模型价**：BS，无风险利率 1.5%、股息率 1.5%、波动率 = 510500 的 20 日已实现波动率 × 1.1（ADR-0002）。
-- 行权价落在上交所行权价网格；到期日 = 到期月份第四个星期三（遇节假日顺延）。
-- 到期按到期日 ETF 收盘价的内在价值结算。
-- 报告必须标注「期权价格为模型价」。
+- 合约代码沿用上交所交易代码：`510500P2412M05500` = 510500、put、2024-12 到期、行权价 5.500。只支持 put 的买方（买入开仓、卖出平仓）。
+- 合约乘数 10000，每张 2 元（买卖都收，到期结算不收），买方不交保证金，权利金现金交割。
+- 期权没有自己的行情：`OptionRules.quote` 由标的当日 bar 现算 **模型价**——BS，无风险利率 1.5%、股息率 1.5%、波动率 = 510500 截至当日的 20 日已实现波动率（后复权价对数收益率，样本标准差 × √252）× 1.1（ADR-0002），剩余期限按自然日 / 365。成交与估值都用它，无滑点。
+- 标的历史不足一个波动率窗口或当日无数据时无报价，订单记「无行情」。
+- 行权价网格：3 元以下间距 0.05，3–5 元 0.1，5–10 元 0.25，10–20 元 0.5，20–50 元 1，50–100 元 2.5，100 元以上 5；`strike_at_or_below` 向下取最近一档。到期日 = 到期月份第四个星期三（遇节假日顺延）。
+- 到期日仍持仓 → 剩余期限为 0，模型价即到期日 ETF 收盘价的内在价值，按它卖出结算并记 `Alert`。
+- 所有参数在 `OptionConfig` 中可配置（`--set option.vol_premium=1.2`）。
+- 报告必须标注「期权价格为模型价」（06 接入报告时实现）。
+- 510500 数据：新浪日线（不复权）+ 累计分红推算后复权因子（`load_etf_bars`）；baostock 给这只 ETF 的复权因子有误，不用。
 
 ## 7. 滚 IC 策略
 
@@ -296,11 +304,11 @@ flowchart LR
     T01["01 骨架 + 双均线<br/>✅ 已完成"] --> T02["02 A 股撮合规则<br/>✅ 已完成"]
     T01 --> T03["03 除权处理<br/>✅ 已完成"]
     T01 --> T04["04 纯滚 IC<br/>✅ 已完成"]
-    T01 --> T05[05 ETF 期权与模型价]
+    T01 --> T05["05 ETF 期权与模型价<br/>✅ 已完成"]
     T04 --> T06[06 滚 IC + put delta 中性]
     T05 --> T06
     classDef done fill:#e8f5e9,stroke:#2e7d32
-    class T01,T02,T03,T04 done
+    class T01,T02,T03,T04,T05 done
 ```
 
 | Ticket | 主要改动模块 | 接口变化 |
@@ -308,7 +316,7 @@ flowchart LR
 | 02 ✅ | `instruments/stock.py`、`portfolio.py`、`engine.py`、`report.py` | 新增 `Rejection`、`BacktestResult.rejections`；`Portfolio.sellable` 给出可卖数量 |
 | 03 ✅ | `engine.py`（除权步骤）、`instruments/stock.py`、`portfolio.py` | 新增 `Portfolio.adjust_position`、`StockRules.apply_ex_rights` |
 | 04 ✅ | `cffex_feed.py`、`akshare_feed.py`、`instruments/future.py`、`calendars.py`、`strategies/roll_ic.py`、`engine.py`、`report.py` | `Bar.settle`；`Strategy.universe`、多标的 `Context`；`InstrumentRules` 与品种分派；`BacktestResult.alerts`；`daily` 增加 margin，报告增加 basis、annualized_discount |
-| 05 | `pricing.py`、`instruments/option.py`、`calendars.py` | 期权估值接入净值 |
+| 05 ✅ | `pricing.py`、`instruments/option.py`、`calendars.py`、`akshare_feed.py`、`engine.py` | `InstrumentRules.quote`；`BacktestConfig.option`；期权估值接入净值 |
 | 06 | `strategies/roll_ic.py`、`report.py` | `daily.net_delta`、收益拆解 |
 
 04 是结构性改动最大的一步，已完成。
@@ -317,6 +325,7 @@ flowchart LR
 
 - 衍生品按当日收盘成交带来少量日内乐观偏差，已接受；不要改成次日开盘，除非同时引入日内数据（ADR-0003）。
 - 期权模型价不含波动率曲面和买卖价差，对冲成本可能被高估或低估；2022-09 之前的 put 完全是假设品种（ADR-0002）。
+- 510500 的后复权因子只处理现金分红，2015-04 的份额折算没有处理；回测从 2016 年起、波动率窗口不跨过折算日，不受影响。
 - 只记录保证金占用，不模拟追保与强平。
 - 除权处理是分红再投资的近似：现金红利按复权因子折成股数，不计红利税，零股取整到最近的整股。
 - 除权日的除权参考价由复权因子比例推算，不是交易所公布值；新股上市初期无涨跌幅、北交所 30% 等规则未建模。

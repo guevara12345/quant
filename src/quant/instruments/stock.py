@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
-from quant.data.feed import Bar
+from quant.data.feed import Bar, DataFeed
 from quant.portfolio import Alert, Fill, Portfolio, RejectReason, Rejection
 from quant.strategy import Order, Side
 
@@ -42,8 +42,9 @@ class StockRules:
 
     fills_at_close = False  # 订单进 pending，次一交易日开盘撮合
 
-    def __init__(self, config: StockConfig):
+    def __init__(self, config: StockConfig, feed: DataFeed):
         self.config = config
+        self.feed = feed
         # 涨跌停基准：上一个有 bar 的交易日的不复权收盘价，除权日替换为除权参考价
         self._ref_price: dict[str, float] = {}
         self._last_factor: dict[str, float] = {}
@@ -67,6 +68,9 @@ class StockRules:
         if side is Side.SELL:
             fee += amount * c.stamp_duty_rate
         return fee
+
+    def quote(self, symbol: str, day: date) -> Bar | None:
+        return self.feed.bar(symbol, day)
 
     def before_open(self, symbol: str, day: date, bar: Bar, portfolio: Portfolio) -> None:
         """开盘前：复权因子较上一个有 bar 的交易日变化时做除权调整。"""

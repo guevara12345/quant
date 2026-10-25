@@ -11,6 +11,7 @@ import pandas as pd
 from quant.data.feed import Bar, DataFeed
 from quant.instruments import InstrumentRules
 from quant.instruments.future import FutureConfig, FutureRules, is_future
+from quant.instruments.option import OptionConfig, OptionRules, is_option
 from quant.instruments.stock import StockConfig, StockRules
 from quant.portfolio import Alert, Fill, Portfolio, RejectReason, Rejection
 from quant.strategy import Context, Order, Strategy
@@ -29,6 +30,7 @@ class BacktestConfig:
     cash_rate: float = 0.015  # 闲置现金年化利率，按自然日计息
     stock: StockConfig = field(default_factory=StockConfig)
     future: FutureConfig = field(default_factory=FutureConfig)
+    option: OptionConfig = field(default_factory=OptionConfig)
 
 
 @dataclass
@@ -43,11 +45,14 @@ class _Dispatcher:
     """按品种代码选规则对象。"""
 
     def __init__(self, config: BacktestConfig, feed: DataFeed):
-        self.stock = StockRules(config.stock)
+        self.stock = StockRules(config.stock, feed)
         self.future = FutureRules(config.future, feed)
+        self.option = OptionRules(config.option, feed)
 
     def __call__(self, symbol: str) -> InstrumentRules:
-        return self.future if is_future(symbol) else self.stock
+        if is_future(symbol):
+            return self.future
+        return self.option if is_option(symbol) else self.stock
 
 
 def run_backtest(
@@ -79,7 +84,7 @@ def run_backtest(
     for day in feed.trading_days(start, end):
         symbols = list(dict.fromkeys(
             [*strategy.universe(day), *portfolio.positions, *(o.symbol for o in pending)]))
-        bars = {s: b for s in symbols if (b := feed.bar(s, day)) is not None}
+        bars = {s: b for s in symbols if (b := rules_for(s).quote(s, day)) is not None}
 
         # 0. 现金计息：上一交易日收盘后的闲置现金（扣除保证金占用）按间隔的自然日数计息
         if prev_day is not None:
@@ -108,7 +113,7 @@ def run_backtest(
             for order in strategy.on_bar(ctx):
                 if not rules_for(order.symbol).fills_at_close:
                     pending.append(order)
-                elif (quote := bars.get(order.symbol) or feed.bar(order.symbol, day)) is not None:
+                elif (quote := bars.get(order.symbol) or rules_for(order.symbol).quote(order.symbol, day)) is not None:
                     execute(order, day, quote)
                 else:
                     rejections.append(Rejection(

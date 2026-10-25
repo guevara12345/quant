@@ -16,6 +16,10 @@ class InstrumentRules(Protocol):
     # False：订单进 pending、次一交易日开盘撮合（股票）；True：策略返回后当日收盘撮合（衍生品，ADR-0003）
     fills_at_close: bool
 
+    def quote(self, symbol: str, day: date) -> Bar | None:
+        """当日行情：股票、期货直接取 DataFeed 的 bar，期权由标的现算模型价。None 表示当日无行情。"""
+        ...
+
     def before_open(self, symbol: str, day: date, bar: Bar, portfolio: Portfolio) -> None:
         """开盘前的调整，如股票除权。"""
         ...

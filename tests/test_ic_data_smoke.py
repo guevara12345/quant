@@ -1,10 +1,10 @@
-"""联网冒烟测试：验证中金所 IC 分合约适配器与 AKShare 指数适配器。默认跳过，用 pytest --run-network 启用。"""
+"""联网冒烟测试：验证中金所 IC 分合约适配器与 AKShare 指数、ETF 适配器。默认跳过，用 pytest --run-network 启用。"""
 
 from datetime import date
 
 import pytest
 
-from quant.data.akshare_feed import load_index_bars
+from quant.data.akshare_feed import load_etf_bars, load_index_bars
 from quant.data.cffex_feed import load_cffex_bars
 
 
@@ -26,3 +26,13 @@ def test_akshare_csi500_index_bars(tmp_path):
                            date(2024, 1, 31), tmp_path)
     assert len(bars) == 22
     assert 4000 < bars[date(2024, 1, 2)].close < 7000
+
+
+@pytest.mark.network
+def test_akshare_500etf_bars_back_adjusted_across_dividend(tmp_path):
+    # 2024-05-17 除息（每份 0.087）：不复权价跳空，后复权价连续
+    bars = load_etf_bars("sh.510500", date(2024, 5, 1), date(2024, 5, 31), tmp_path)
+    before, ex = bars[date(2024, 5, 16)], bars[date(2024, 5, 17)]
+    assert 3 < before.close < 10
+    assert ex.adj_factor == pytest.approx(before.adj_factor * before.close / (before.close - 0.087))
+    assert abs(ex.adj_close / before.adj_close - 1) < 0.03

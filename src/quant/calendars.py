@@ -1,4 +1,4 @@
-"""合约日历：股指期货到期日、季月合约选取。交易日历由调用方以函数形式传入（通常是 DataFeed.trading_days）。"""
+"""合约日历与合约规则：股指期货到期日、季月合约选取，ETF 期权到期日与行权价网格。交易日历由调用方以函数形式传入（通常是 DataFeed.trading_days）。"""
 
 from __future__ import annotations
 
@@ -51,3 +51,35 @@ def weekdays_after(day: date, until: date) -> list[date]:
             out.append(d)
         d += timedelta(days=1)
     return out
+
+
+# 上交所 ETF 期权行权价间距，按行权价所在区间分档：(区间上限（含）, 间距)，单位厘（0.001 元），避免浮点误差
+STRIKE_STEPS_MILLI = ((3_000, 50), (5_000, 100), (10_000, 250),
+                      (20_000, 500), (50_000, 1_000), (100_000, 2_500))
+STRIKE_STEP_ABOVE_MILLI = 5_000  # 100 元以上
+
+
+def strike_at_or_below(price: float) -> float:
+    """行权价网格上不高于 price 的最近一档（平值 put 的行权价）。
+
+    间距取 price 所在档；各档边界（3、5、10、20、50、100 元）都是高一档间距的整数倍，
+    所以向下取整不会落到网格之外。
+    """
+    milli = round(price * 1000)
+    step = next((s for upper, s in STRIKE_STEPS_MILLI if milli <= upper), STRIKE_STEP_ABOVE_MILLI)
+    return milli // step * step / 1000
+
+
+def fourth_wednesday(year: int, month: int) -> date:
+    first = date(year, month, 1)
+    return first + timedelta(days=(2 - first.weekday()) % 7 + 21)
+
+
+def option_expiry(year: int, month: int, trading_days: TradingDays) -> date:
+    """上交所 ETF 期权到期日：到期月份第四个星期三，遇节假日顺延到下一个交易日。
+
+    与 future_expiry 一样，第四个星期三之后不在已知交易日历内时按第四个星期三计。
+    """
+    wednesday = fourth_wednesday(year, month)
+    following = trading_days(wednesday, wednesday + timedelta(days=30))
+    return following[0] if following else wednesday

@@ -50,6 +50,9 @@ class FutureRules:
         self.config = config
         self.feed = feed
 
+    def quote(self, symbol: str, day: date) -> Bar | None:
+        return self.feed.bar(symbol, day)
+
     def before_open(self, symbol: str, day: date, bar: Bar, portfolio: Portfolio) -> None:
         pass
 
