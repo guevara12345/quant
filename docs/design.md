@@ -1,9 +1,9 @@
 # 设计文档：A 股量化研究原型
 
-> **状态**：ticket 01（骨架 + 双均线）、02（A 股撮合规则）、03（除权处理）、04（纯滚 IC）、05（ETF 期权与模型价）已落地；06 待实现。
+> **状态**：ticket 01（骨架 + 双均线）、02（A 股撮合规则）、03（除权处理）、04（纯滚 IC）、05（ETF 期权与模型价）、06（滚 IC + put delta 中性）均已落地。
 > **需求来源**：`.scratch/a-share-quant-prototype/spec.md`；**术语**以 [`GLOSSARY.md`](../GLOSSARY.md) 为准；**决策**见 [`docs/adr/`](adr/)。
 > **现有代码导读**：[`code-walkthrough.md`](code-walkthrough.md)。
-> 本文说明系统的设计原则与目标形态，以及 06 要把代码演进成什么样。凡是尚未实现的内容都标注「目标」。
+> 本文说明系统的设计原则与目标形态，以及各 ticket 把代码演进成了什么样。
 >
 > 文中的图使用 Mermaid，在 GitHub、VS Code（Markdown Preview Mermaid Support 插件）、Typora 中都能直接渲染。
 
@@ -33,7 +33,7 @@
 
 ## 2. 现状与差距
 
-ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易日推进的引擎、策略接口、双均线、指标与报告、命令行入口；ticket 02 补上了 A 股撮合规则（T+1、整手、涨跌停、停牌、完整费用、滑点、资金检查）和未成交记录；ticket 03 补上了除权处理（持股按复权因子放大、除权日涨跌停以除权参考价为基准）；ticket 04 把引擎改成多标的、按品种分派，加上期货规则、IC 到期日历、中金所与 AKShare 数据适配器和纯滚 IC 策略；ticket 05 加上 ETF 期权品种（BS 模型价、到期按内在价值结算）、期权到期日、行权价网格和 510500 数据适配器。代码如何运转见 [`code-walkthrough.md`](code-walkthrough.md)。
+ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易日推进的引擎、策略接口、双均线、指标与报告、命令行入口；ticket 02 补上了 A 股撮合规则（T+1、整手、涨跌停、停牌、完整费用、滑点、资金检查）和未成交记录；ticket 03 补上了除权处理（持股按复权因子放大、除权日涨跌停以除权参考价为基准）；ticket 04 把引擎改成多标的、按品种分派，加上期货规则、IC 到期日历、中金所与 AKShare 数据适配器和纯滚 IC 策略；ticket 05 加上 ETF 期权品种（BS 模型价、到期按内在价值结算）、期权到期日、行权价网格和 510500 数据适配器；ticket 06 在滚 IC 上叠加平值次月 500ETF put 的 delta 中性对冲，报告给出三条净值曲线、每日净 delta、收益拆解和按 2022-09 分段的指标。代码如何运转见 [`code-walkthrough.md`](code-walkthrough.md)。
 
 | 模块 | 现状 | 目标 |
 | --- | --- | --- |
@@ -43,15 +43,13 @@ ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易�
 | `instruments/stock.py`、`instruments/future.py` | A 股撮合规则；期货收盘成交、盯市、平今平昨、保证金、到期强平 | — |
 | `instruments/option.py` | 期权现算模型价行情、收盘成交、每张 2 元、到期按内在价值结算 | — |
 | `calendars.py` | IC 到期日、季月合约、工作日延伸日历、期权到期日、行权价网格 | — |
-| `pricing.py` | BS put 模型价与 delta、已实现波动率 | — |
-| `engine.py` | 多标的、按品种分派（`InstrumentRules`，行情也经规则的 `quote` 取）、完整每日事件顺序 | — |
-| `strategy.py` | 多标的 `Context`、`Strategy.universe` | — |
-| `strategies/roll_ic.py` | 纯滚 IC（`--no-hedge`） | put 对冲（06） |
-| `metrics.py`、`report.py` | 策略 vs 基准；基差与年化贴水率；`rejections.csv`、`alerts.csv` | 三条曲线、收益拆解、分段指标（06） |
+| `pricing.py` | BS put 模型价与 delta、由价格反推波动率、已实现波动率 | — |
+| `engine.py` | 多标的、按品种分派（`InstrumentRules`，行情也经规则的 `quote` 取）、完整每日事件顺序；快照记录当日利息 | — |
+| `strategy.py` | 多标的 `Context`（universe 外的品种按需现取当日行情）、`Strategy.universe` | — |
+| `strategies/roll_ic.py` | 滚 IC；`PutHedge` 时用 put 对冲到 delta 中性（06） | — |
+| `metrics.py`、`report.py` | 策略 vs 基准；基差与年化贴水率；`rejections.csv`、`alerts.csv`；三条曲线、每日净 delta、收益拆解、分段指标（06） | — |
 
-与目标相比最关键的差距：
-
-- put 对冲与收益拆解（06）尚未实现；510500 数据已有适配器，但还没接进 CLI。
+spec 中的 ticket 01–06 均已实现，目标架构与现状一致。
 
 ## 3. 设计原则
 
@@ -169,12 +167,12 @@ flowchart TD
     D --> E[期货按结算价盯市]
     E --> F["处理到期<br/>期货强平 / 期权按内在价值结算"]
     F --> G[现金计息]
-    G --> H["记录快照<br/>+ margin、net_delta、basis"]
+    G --> H["记录快照<br/>+ margin、interest"]
 ```
 
 股票订单进入 `pending` 隔日撮合；衍生品订单在策略返回后当日立即撮合。引擎按订单的品种类型决定路径，策略无需关心。
 
-04 的实现与上图的差别只有一处：现金计息放在每个交易日开头，为上一段间隔（含周末）计息，与「当日末计息」在净值上等价。期权（05）在 F 步（`after_close`）按内在价值结算。
+04 的实现与上图的差别只有一处：现金计息放在每个交易日开头，为上一段间隔（含周末）计息，与「当日末计息」在净值上等价。期权（05）在 F 步（`after_close`）按内在价值结算。net_delta、basis 不在引擎快照里，由 `metrics.delta_table`、`basis_table` 按每日持仓事后计算（06）。
 
 ## 6. 品种规则
 
@@ -238,7 +236,7 @@ flowchart LR
 - 行权价网格：3 元以下间距 0.05，3–5 元 0.1，5–10 元 0.25，10–20 元 0.5，20–50 元 1，50–100 元 2.5，100 元以上 5；`strike_at_or_below` 向下取最近一档。到期日 = 到期月份第四个星期三（遇节假日顺延）。
 - 到期日仍持仓 → 剩余期限为 0，模型价即到期日 ETF 收盘价的内在价值，按它卖出结算并记 `Alert`。
 - 所有参数在 `OptionConfig` 中可配置（`--set option.vol_premium=1.2`）。
-- 报告必须标注「期权价格为模型价」（06 接入报告时实现）。
+- 报告标注「期权价格为模型价」（06：净值图标题、终端、`metrics.json` 的 `note`）。
 - 510500 数据：新浪日线（不复权）+ 累计分红推算后复权因子（`load_etf_bars`）；baostock 给这只 ETF 的复权因子有误，不用。
 
 ## 7. 滚 IC 策略
@@ -260,7 +258,14 @@ flowchart TD
     Rebal --> End
 ```
 
-「当季合约」在本项目中指尚未进入展期窗口的最近一个季月合约（可能同时是交易所口径的当月或下月合约），见甘特图。04 已实现图中「否（--no-hedge）」一支（`strategies/roll_ic.py`），展期日 = 距到期还剩 `roll_days` 个交易日的那天（如 2024-12-20 到期、展期 5 日 → 12-13 展期）。
+「当季合约」在本项目中指尚未进入展期窗口的最近一个季月合约（可能同时是交易所口径的当月或下月合约），见甘特图。展期日 = 距到期还剩 `roll_days` 个交易日的那天（如 2024-12-20 到期、展期 5 日 → 12-13 展期）。04 实现了「否（--no-hedge）」一支，06 实现了对冲一支（`strategies/roll_ic.py` 的 `PutHedge`、`hedge_orders`）。
+
+06 的几处具体约定：
+
+- **次月**：当日所在月份的下一个月。
+- **再平衡按同一规则重选 put**（ADR-0004）：图中「调整 put 张数」在实现里是先按建仓、换月时的规则（当日的次月、平值）重选 put，选出的就是持有的 put 时只调张数，否则平掉旧 put、买入新 put。只调张数在 ETF 大涨后（旧 put 深度虚值）或临近到期（向下取一档的 put 偏虚值）时 delta 趋近 0，张数会失控：2016-07 真实数据中一次要买 600 多万张，资金耗尽后对冲失效、净值跌掉 90%。
+- **delta 的波动率**：策略由当日 put 模型价反推波动率再算 delta（`implied_vol`），与模型价自洽，也不需要知道模型价用的波动率窗口与溢价系数。
+- **收盘才确定的 put**：平值行权价取决于当日 ETF 收盘价，策略无法在 `universe` 里提前声明，经 `Context.bar` 按需取当日模型价（同一交易日的行情，不是未来数据）。
 
 | 参数 | 默认 |
 | --- | --- |
@@ -291,11 +296,11 @@ gantt
 | 输出 | 内容 | Ticket |
 | --- | --- | --- |
 | `rejections.csv` | 未成交订单及原因（已实现，终端同时打印按原因计数） | 02 |
-| `daily.csv` 新列 | margin、contract、basis、annualized_discount（04 已实现）；net_delta | 04、06 |
+| `daily.csv` 新列 | margin、contract、basis、annualized_discount（04）；interest、net_delta、net_delta_ratio、unhedged_nav（06） | 04、06 |
 | `alerts.csv` | 到期强制平仓等警告（04 已实现，终端同时打印） | 04 |
-| 净值图 | 纯滚 IC vs 中证 500 买入持有（04 已实现）；06 加上本策略成三条曲线 | 04、06 |
-| 收益拆解 | 贴水收敛、put 成本、交易费用、现金利息，之和 = 总盈亏 | 06 |
-| 分段指标 | 500ETF 期权上市（2022-09）前后分别给出，并标注模型价 | 06 |
+| 净值图 | 纯滚 IC vs 中证 500 买入持有（04）；06 加上本策略成三条曲线，下方加净 delta / IC 名义本金一栏 | 04、06 |
+| 收益拆解 | 贴水收敛（IC 盈亏中基差变化的部分）、指数涨跌与 put（put 盈亏 + IC 随中证 500 涨跌的盈亏，对冲时即 put 的对冲成本）、交易费用、现金利息，之和 = 总盈亏；本策略与纯滚 IC 并列 | 06 |
+| 分段指标 | 以 500ETF 期权上市日 2022-09-19 为界分两段，并标注模型价 | 06 |
 
 ## 9. 演进路线
 
@@ -305,10 +310,10 @@ flowchart LR
     T01 --> T03["03 除权处理<br/>✅ 已完成"]
     T01 --> T04["04 纯滚 IC<br/>✅ 已完成"]
     T01 --> T05["05 ETF 期权与模型价<br/>✅ 已完成"]
-    T04 --> T06[06 滚 IC + put delta 中性]
+    T04 --> T06["06 滚 IC + put delta 中性<br/>✅ 已完成"]
     T05 --> T06
     classDef done fill:#e8f5e9,stroke:#2e7d32
-    class T01,T02,T03,T04,T05 done
+    class T01,T02,T03,T04,T05,T06 done
 ```
 
 | Ticket | 主要改动模块 | 接口变化 |
@@ -317,7 +322,7 @@ flowchart LR
 | 03 ✅ | `engine.py`（除权步骤）、`instruments/stock.py`、`portfolio.py` | 新增 `Portfolio.adjust_position`、`StockRules.apply_ex_rights` |
 | 04 ✅ | `cffex_feed.py`、`akshare_feed.py`、`instruments/future.py`、`calendars.py`、`strategies/roll_ic.py`、`engine.py`、`report.py` | `Bar.settle`；`Strategy.universe`、多标的 `Context`；`InstrumentRules` 与品种分派；`BacktestResult.alerts`；`daily` 增加 margin，报告增加 basis、annualized_discount |
 | 05 ✅ | `pricing.py`、`instruments/option.py`、`calendars.py`、`akshare_feed.py`、`engine.py` | `InstrumentRules.quote`；`BacktestConfig.option`；期权估值接入净值 |
-| 06 | `strategies/roll_ic.py`、`report.py` | `daily.net_delta`、收益拆解 |
+| 06 ✅ | `strategies/roll_ic.py`、`pricing.py`、`instruments/option.py`、`strategy.py`、`engine.py`、`metrics.py`、`report.py`、`cli.py` | `PutHedge`；`Context.bar` 按需取 universe 外行情；`daily.interest`；`delta_table`、`return_breakdown`、`split_metrics`（`compute_metrics` 可按区间统计）；`write_report(comparisons=...)` |
 
 04 是结构性改动最大的一步，已完成。
 
@@ -334,3 +339,6 @@ flowchart LR
 - IC 分合约数据直接取自中金所官网月度数据包，而不是 spec 写的 AKShare：AKShare 读的是同一个数据包，但逐日请求、每次重新下载整月 zip，且写死的浏览器 User-Agent 在部分网络环境下被安全网关拦截后静默返回空表。中证 500 仍走 AKShare。
 - 基差用期货与指数的**收盘价**计算（不是结算价）；年化贴水率按距到期的自然日折算。
 - 预期 delta 中性方案的结果可能为负——这是原型要回答的问题，不是缺陷。
+- 模型波动率 = 已实现波动率 × 1.1，put 的时间价值流失与对冲中赚到的 gamma 收益大体相当，所以对冲成本偏小；真实隐含波动率溢价更高时成本会更大，可用 `--set option.vol_premium=...` 做敏感性分析。
+- 收益拆解的指数部分用中证 500，put 对冲的是 510500：两者的跟踪误差与 ETF 分红落在「指数涨跌与 put」里，期货滑点落在「贴水收敛」里。贴水收敛按残差计算，所以四项之和恒等于总盈亏。
+- 对冲再平衡每次重选 put，换手较高（2016–2026 期权约 16 万张、费用约 32 万元，每张 2 元）。行权价间距 0.25 元时「向下取一档」的 put 可能虚值 4% 左右，低波动时期张数偏多（单笔最多约 550 张），见 ADR-0004。

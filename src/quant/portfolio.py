@@ -129,7 +129,8 @@ class Portfolio:
         else:
             self.positions.pop(symbol, None)
 
-    def accrue_interest(self, annual_rate: float, days: int) -> None:
-        """闲置现金（扣除保证金占用的部分）按年化利率、自然日数计息。"""
-        idle = self.cash - sum(self.margins.values())
-        self.cash += idle * annual_rate * days / 365
+    def accrue_interest(self, annual_rate: float, days: int) -> float:
+        """闲置现金（扣除保证金占用的部分）按年化利率、自然日数计息，返回利息。"""
+        interest = (self.cash - sum(self.margins.values())) * annual_rate * days / 365
+        self.cash += interest
+        return interest

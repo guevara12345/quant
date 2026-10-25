@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import date
+from functools import partial
 
 import pandas as pd
 
@@ -35,7 +36,7 @@ class BacktestConfig:
 
 @dataclass
 class BacktestResult:
-    daily: pd.DataFrame  # date, cash, market_value, margin, nav, positions
+    daily: pd.DataFrame  # date, cash, market_value, margin, nav, interest（当日计入的利息）, positions
     fills: pd.DataFrame  # FILL_COLUMNS
     rejections: pd.DataFrame  # REJECTION_COLUMNS，未成交订单及原因
     alerts: pd.DataFrame  # ALERT_COLUMNS，如到期强制平仓
@@ -53,6 +54,9 @@ class _Dispatcher:
         if is_future(symbol):
             return self.future
         return self.option if is_option(symbol) else self.stock
+
+    def quote(self, day: date, symbol: str) -> Bar | None:
+        return self(symbol).quote(symbol, day)
 
 
 def run_backtest(
@@ -87,8 +91,9 @@ def run_backtest(
         bars = {s: b for s in symbols if (b := rules_for(s).quote(s, day)) is not None}
 
         # 0. 现金计息：上一交易日收盘后的闲置现金（扣除保证金占用）按间隔的自然日数计息
+        interest = 0.0
         if prev_day is not None:
-            portfolio.accrue_interest(config.cash_rate, (day - prev_day).days)
+            interest = portfolio.accrue_interest(config.cash_rate, (day - prev_day).days)
         prev_day = day
 
         # 1. 开盘前调整（股票除权：持股按复权因子放大、涨跌停改以除权参考价为基准）
@@ -109,7 +114,8 @@ def run_backtest(
         # 3. 收盘调用策略；开盘成交的订单进 pending，收盘成交的订单当日撮合（ADR-0003）
         if bars:
             ctx = Context(day=day, cash=portfolio.cash, positions=dict(portfolio.positions),
-                          bars=dict(bars), _history=history, _trading_days=feed.trading_days)
+                          bars=dict(bars), _history=history, _trading_days=feed.trading_days,
+                          _quote=partial(rules_for.quote, day))
             for order in strategy.on_bar(ctx):
                 if not rules_for(order.symbol).fills_at_close:
                     pending.append(order)
@@ -138,6 +144,7 @@ def run_backtest(
             "market_value": market_value,
             "margin": sum(portfolio.margins.values()),
             "nav": portfolio.cash + market_value,
+            "interest": interest,
             "positions": dict(portfolio.positions),
         })
 

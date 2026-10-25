@@ -33,7 +33,8 @@ class Order:
 class Context:
     """策略在信号日收盘时能看到的全部信息，不含未来数据。
 
-    bars 是当日 universe 内各品种的 bar（无数据的品种不在其中）；history(symbol) 只包含截至当日（含）的 bar。
+    bars 是当日 universe 内各品种的 bar（无数据的品种不在其中）；bar(symbol) 对 universe 之外的品种按需现取当日行情
+    （如收盘时才知道行权价的 put），同样不含未来数据。history(symbol) 只包含截至当日（含）的 bar。
     交易日历是事先公布的公开信息，可以查询未来日期（trading_days），用于计算到期前的交易日数。
     """
 
@@ -43,9 +44,10 @@ class Context:
     bars: dict[str, Bar]
     _history: dict[str, list[tuple[date, Bar]]] = field(repr=False)
     _trading_days: Callable[[date, date], list[date]] = field(repr=False)
+    _quote: Callable[[str], Bar | None] = field(default=lambda symbol: None, repr=False)
 
     def bar(self, symbol: str) -> Bar | None:
-        return self.bars.get(symbol)
+        return self.bars[symbol] if symbol in self.bars else self._quote(symbol)
 
     def history(self, symbol: str) -> list[tuple[date, Bar]]:
         return list(self._history.get(symbol, []))

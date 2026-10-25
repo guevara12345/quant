@@ -1,6 +1,6 @@
 # 代码导读：A 股量化研究原型
 
-> **适用范围**：ticket 01（骨架 + 双均线）、02（A 股撮合规则）、03（除权处理）、04（纯滚 IC）落地后的代码。
+> **适用范围**：ticket 01（骨架 + 双均线）、02（A 股撮合规则）、03（除权处理）、04（纯滚 IC）、05（ETF 期权与模型价）、06（滚 IC + put delta 中性）落地后的代码。
 > **配套文档**：目标设计与演进路线见 [`design.md`](design.md)；术语以 [`GLOSSARY.md`](../GLOSSARY.md) 为准；决策见 [`docs/adr/`](adr/)。
 > 本文配合图表，逐个文件、逐个函数讲清楚**现有代码**怎么运转。代码演进后，请同步更新行号和「容易忽略的细节」一节。
 >
@@ -27,7 +27,7 @@
 
 ## 1. 30 秒看懂项目
 
-一句话：**`backtest ma_cross` 从 baostock 拉一只 A 股的日线（带本地缓存），在每个交易日收盘调用策略拿到订单，下一交易日开盘撮合进统一账户，最后算指标、画净值图。`backtest roll_ic --no-hedge` 走同一个引擎，数据换成中金所 IC 各合约与中证 500，期货订单当日收盘成交、按结算价盯市。ETF 期权（ticket 05，尚无策略使用）也接在同一个引擎上：没有自己的行情，按 510500 现算 BS 模型价成交与估值。**
+一句话：**`backtest ma_cross` 从 baostock 拉一只 A 股的日线（带本地缓存），在每个交易日收盘调用策略拿到订单，下一交易日开盘撮合进统一账户，最后算指标、画净值图。`backtest roll_ic` 走同一个引擎，数据换成中金所 IC 各合约、中证 500 与 510500：持有 IC 多头吃贴水收敛，期货订单当日收盘成交、按结算价盯市；同时买平值次月 500ETF put 把组合对冲到 delta 中性。期权没有自己的行情，按 510500 现算 BS 模型价成交与估值。`--no-hedge` 只滚 IC。**
 
 ```mermaid
 flowchart LR
@@ -36,12 +36,12 @@ flowchart LR
     C --> D["run_backtest<br/>逐交易日推进，按品种分派规则"]
     E["MaCross / RollIC.on_bar<br/>收盘产生订单"] <--> D
     D --> F["BacktestResult<br/>daily + fills + rejections + alerts"]
-    F --> G["compute_metrics"]
+    F --> G["compute_metrics<br/>（roll_ic 另有 delta_table、<br/>return_breakdown、split_metrics）"]
     F --> H["write_report<br/>nav.png / CSV / JSON"]
     G --> H
 ```
 
-整个代码库约 1,300 行，没有框架魔法，所有调用都是显式的函数调用，可以从 `cli.main` 一路跟下去。
+整个代码库约 1,700 行，没有框架魔法，所有调用都是显式的函数调用，可以从 `cli.main` 一路跟下去。
 
 ## 2. 推荐阅读顺序
 
@@ -57,8 +57,8 @@ flowchart LR
 | 6 | [`calendars.py`](../src/quant/calendars.py)、[`instruments/future.py`](../src/quant/instruments/future.py) | IC 到期日与季月合约；期货收盘成交、盯市、平今平昨、到期强平 | 10 分钟 |
 | 6b | [`pricing.py`](../src/quant/pricing.py)、[`instruments/option.py`](../src/quant/instruments/option.py) | BS 模型价与 delta；期权现算行情、收盘成交、到期按内在价值结算 | 10 分钟 |
 | 7 | [`engine.py`](../src/quant/engine.py) | **核心**：每日循环的六个步骤与品种分派 | 10 分钟 |
-| 8 | [`strategies/ma_cross.py`](../src/quant/strategies/ma_cross.py)、[`strategies/roll_ic.py`](../src/quant/strategies/roll_ic.py) | 两个具体策略 | 5 分钟 |
-| 9 | [`tests/test_engine.py`](../tests/test_engine.py)、[`tests/test_stock_rules.py`](../tests/test_stock_rules.py)、[`tests/test_future_rules.py`](../tests/test_future_rules.py)、[`tests/test_roll_ic.py`](../tests/test_roll_ic.py)、[`tests/test_option_rules.py`](../tests/test_option_rules.py) | 用测试反向理解引擎语义与撮合规则 | 20 分钟 |
+| 8 | [`strategies/ma_cross.py`](../src/quant/strategies/ma_cross.py)、[`strategies/roll_ic.py`](../src/quant/strategies/roll_ic.py) | 两个具体策略（滚 IC 含 put 对冲） | 10 分钟 |
+| 9 | [`tests/test_engine.py`](../tests/test_engine.py)、[`tests/test_stock_rules.py`](../tests/test_stock_rules.py)、[`tests/test_future_rules.py`](../tests/test_future_rules.py)、[`tests/test_roll_ic.py`](../tests/test_roll_ic.py)、[`tests/test_option_rules.py`](../tests/test_option_rules.py)、[`tests/test_roll_ic_hedge.py`](../tests/test_roll_ic_hedge.py) | 用测试反向理解引擎语义、撮合规则与对冲逻辑 | 25 分钟 |
 | 10 | [`data/cache.py`](../src/quant/data/cache.py) | 缓存覆盖区间算法、按月断点续拉 | 10 分钟 |
 | 11 | [`data/baostock_feed.py`](../src/quant/data/baostock_feed.py)、[`data/cffex_feed.py`](../src/quant/data/cffex_feed.py)、[`data/akshare_feed.py`](../src/quant/data/akshare_feed.py) | 外部数据怎么变成 `Bar` | 10 分钟 |
 | 12 | [`metrics.py`](../src/quant/metrics.py)、[`report.py`](../src/quant/report.py)、[`cli.py`](../src/quant/cli.py) | 输出与入口 | 10 分钟 |
@@ -69,14 +69,14 @@ flowchart LR
 
 ```
 src/quant/
-├── cli.py                  命令行入口，串联全流程；load_roll_ic_feed 组装 IC + 中证 500 + 日历
+├── cli.py                  命令行入口，串联全流程；load_roll_ic_feed 组装 IC + 中证 500 + 510500 + 日历；run_roll_ic 同时跑对冲与纯滚 IC
 ├── engine.py               回测主循环、按品种分派、BacktestConfig、BacktestResult
 ├── strategy.py             Strategy（universe + on_bar）/ Context / Order / Side
 ├── portfolio.py            Portfolio 统一账户、Fill、Rejection / RejectReason、Alert
 ├── calendars.py            IC 到期日、季月合约、工作日延伸日历；期权到期日、行权价网格
-├── pricing.py              BS 模型价与 delta、已实现波动率
-├── metrics.py              绩效指标、买入持有基准、基差与年化贴水率
-├── report.py               指标文本、净值图、CSV/JSON 输出
+├── pricing.py              BS 模型价与 delta、由价格反推波动率、已实现波动率
+├── metrics.py              绩效指标（可按区间分段）、买入持有基准、基差与年化贴水率、每日净 delta、收益拆解
+├── report.py               指标 / 收益拆解文本、净值图（对照曲线 + 净 delta 栏）、CSV/JSON 输出
 ├── data/
 │   ├── feed.py             Bar、DataFeed 协议、InMemoryDataFeed
 │   ├── cache.py            ParquetCache（覆盖区间 + 增量补拉 + 按月断点续拉）
@@ -87,10 +87,10 @@ src/quant/
 │   ├── __init__.py         InstrumentRules 协议
 │   ├── stock.py            StockConfig、StockRules（A 股撮合规则）
 │   ├── future.py           FutureConfig、FutureRules（期货规则）、合约代码与到期日
-│   └── option.py           OptionConfig、OptionRules（ETF 期权规则）、合约代码解析
+│   └── option.py           OptionConfig、OptionRules（ETF 期权规则）、合约代码解析与生成、每张 delta 敞口
 └── strategies/
     ├── ma_cross.py         双均线
-    └── roll_ic.py          纯滚 IC
+    └── roll_ic.py          滚 IC（可选 PutHedge：put 对冲到 delta 中性）、组合净 delta
 tests/
 ├── conftest.py             make_bar / make_feed / stock_costs / make_future_bar / future_costs / make_multi_feed、--run-network 开关
 ├── test_engine.py          引擎语义：交易日、计息、成交时点、佣金
@@ -98,7 +98,8 @@ tests/
 ├── test_future_rules.py    期货规则：盯市、保证金、平今平昨、到期强平与节假日顺延、资金不足、保证金不计息
 ├── test_roll_ic.py         纯滚 IC：手数、展期、展期天数、基差与年化贴水率、报告列
 ├── test_option_rules.py    期权规则：到期按内在价值结算、到期日顺延、每日模型价估值、资金不足、无报价
-├── test_pricing.py         纯函数：行权价网格、BS 无套利边界与手算值、delta 范围
+├── test_roll_ic_hedge.py   put 对冲：建仓净 delta、阈值再平衡与重选平值、put 换月、IC 展期、收益拆解、分段指标、报告列
+├── test_pricing.py         纯函数：行权价网格、BS 无套利边界与手算值、零波动率、delta 范围、反推波动率
 ├── test_ma_cross.py        金叉买、死叉卖
 ├── test_metrics.py         指标手算校验（含期货按名义本金）
 ├── test_report.py          rejections.csv 与未成交汇总
@@ -155,9 +156,12 @@ flowchart TD
     option --> cal
     option --> pricing
     roll --> future
+    roll --> option
     roll --> cal
     metrics --> engine
     metrics --> future
+    metrics --> option
+    metrics --> roll
     report --> engine
     portfolio --> strategy
     strategy --> feed
@@ -237,7 +241,7 @@ classDiagram
         +float cash
         +dict positions
         +dict bars  当日 universe 的 bar
-        +bar(symbol) Bar|None
+        +bar(symbol) Bar|None  universe 外按需现取
         +history(symbol) list  截至当日的(date, Bar)
         +trading_days(start, end) list~date~
     }
@@ -257,7 +261,17 @@ classDiagram
     class RollIC {
         +int multiplier
         +int roll_days
+        +PutHedge|None hedge
         +current_contract(ctx) str
+        +hedge_orders(ctx, ic_delta) list~Order~
+    }
+
+    class PutHedge {
+        <<frozen dataclass>>
+        +OptionConfig option
+        +float threshold = 0.10
+        +int roll_days = 5
+        +str underlying = sh.510500
     }
 
     class Fill {
@@ -313,7 +327,7 @@ classDiagram
         +apply_marked(fill)  逐日盯市
         +mark_to_market(symbol, price, multiplier)
         +adjust_position(symbol, quantity)
-        +accrue_interest(rate, days)  扣除保证金后计息
+        +accrue_interest(rate, days) float  扣除保证金后计息
     }
 
     class InstrumentRules {
@@ -406,6 +420,8 @@ classDiagram
     InMemoryDataFeed o-- Bar
     Strategy <|-- MaCross
     Strategy <|-- RollIC
+    RollIC --> PutHedge
+    PutHedge --> OptionConfig
     InstrumentRules <|.. StockRules
     InstrumentRules <|.. FutureRules
     InstrumentRules <|.. OptionRules
@@ -433,7 +449,7 @@ classDiagram
 
 - **几乎全是不可变值对象**（`frozen=True`）：`Bar`、`Order`、`Fill`、`Rejection`、`Alert`、`Context`、所有 `Config`。可变的状态只有 `Portfolio` 和规则对象里按品种记的状态（股票的涨跌停基准价、复权因子，期权最近一次模型价），都只在一次回测内由引擎驱动修改。读代码时盯住 `apply` / `apply_marked`（成交）、`mark_to_market`（盯市）、`adjust_position`（除权）和 `accrue_interest`（计息）几处，就知道钱和持仓是怎么变的。
 - **`Order.quantity` 为 `None` 有特殊语义**：股票买入表示满仓，卖出表示全部卖出（期货卖出同样表示全部平仓；期货买入必须给出手数）。具体股数要到成交日开盘、知道开盘价后才能算，所以推迟到 `StockRules.match_at_open` 决定。给出数量时必须为正数，否则构造 `Order` 就抛 `ValueError`。
-- **`Context` 给策略的是快照副本**：`positions`、`bars` 是副本；`history(symbol)` 每次调用返回新列表，策略即使修改也不会影响引擎（[engine.py:111](../src/quant/engine.py#L111)）。
+- **`Context` 给策略的是快照副本**：`positions`、`bars` 是副本；`history(symbol)` 每次调用返回新列表，策略即使修改也不会影响引擎（[engine.py:116](../src/quant/engine.py#L116)）。`bar(symbol)` 对 universe 之外的品种经 `_quote` 按需取当日行情（`_Dispatcher.quote`），用于收盘时才知道行权价的 put，同样不含未来数据。
 
 ## 5. 一次回测的完整调用链
 
@@ -448,14 +464,14 @@ flowchart LR
     C --> D["④ 输出<br/>指标 + 报告文件"]
 ```
 
-四个阶段都写在 [`cli.main`](../src/quant/cli.py#L30) 里，按策略分两支准备数据和策略，之后共用回测与输出：
+[`cli.main`](../src/quant/cli.py#L35) 完成阶段 ①，再按策略交给 [`run_ma_cross`](../src/quant/cli.py#L72) 或 [`run_roll_ic`](../src/quant/cli.py#L93) 完成 ②–④：
 
 | 阶段 | `cli.main` 中的代码 | 输入 | 输出 | 详见 |
 | --- | --- | --- | --- | --- |
-| ① 准备 | [L49-52](../src/quant/cli.py#L49) `parse_args`、`apply_overrides` | 命令行参数 | `args`、`BacktestConfig` | [§11](#11-命令行与配置覆盖) |
-| ② 加载数据 | [L55](../src/quant/cli.py#L55) `load_baostock_feed`；[L65](../src/quant/cli.py#L65) `load_roll_ic_feed` | 区间、缓存目录 | `InMemoryDataFeed` | [§6](#6-数据层详解) |
-| ③ 回测 | [L57](../src/quant/cli.py#L57) `MaCross(...)` / [L66](../src/quant/cli.py#L66) `RollIC(...)`；[L73](../src/quant/cli.py#L73) `run_backtest` | feed、策略、配置 | `BacktestResult` | [§7](#7-回测引擎详解)–[§9](#9-策略接口与策略实现) |
-| ④ 输出 | [L76-95](../src/quant/cli.py#L76) `basis_table`（roll_ic）、`compute_metrics`、`buy_and_hold_nav`、`write_report`、`print` | result、feed | 终端文本 + 6 个文件 | [§10](#10-绩效指标与报告) |
+| ① 准备 | [L58-61](../src/quant/cli.py#L58) `parse_args`、`apply_overrides` | 命令行参数 | `args`、`BacktestConfig` | [§11](#11-命令行与配置覆盖) |
+| ② 加载数据 | [L74](../src/quant/cli.py#L74) `load_baostock_feed`；[L99](../src/quant/cli.py#L99) `load_roll_ic_feed` | 区间、缓存目录 | `InMemoryDataFeed` | [§6](#6-数据层详解) |
+| ③ 回测 | [L76](../src/quant/cli.py#L76) `run_backtest(MaCross(...))`；[L101](../src/quant/cli.py#L101) 纯滚 IC、[L117](../src/quant/cli.py#L117) 对冲版各跑一次 `run_backtest` | feed、策略、配置 | `BacktestResult` | [§7](#7-回测引擎详解)–[§9](#9-策略接口与策略实现) |
+| ④ 输出 | [L105-146](../src/quant/cli.py#L105) `basis_table`、`delta_table`、`return_breakdown`、`split_metrics`（roll_ic）、`compute_metrics`、`buy_and_hold_nav`、`write_report`、`print` | result、feed | 终端文本 + 6 个文件 | [§10](#10-绩效指标与报告) |
 
 阶段之间只通过这几个值传递：`config`、`feed`、`result`。理解了这三个对象，就理解了模块之间怎么衔接。
 
@@ -499,7 +515,7 @@ sequenceDiagram
     Note over L: 返回 InMemoryDataFeed（交易日历 + bars）
 ```
 
-`roll_ic` 走 [`load_roll_ic_feed`](../src/quant/cli.py#L97)：baostock 交易日历 → 中金所 IC 各合约（`get_by_month` 按月补拉）→ AKShare 中证 500，合成一个 `InMemoryDataFeed`，并把已公布日历之后的工作日追加进日历（见 [§14](#14-阅读时容易忽略的细节)）。
+`roll_ic` 走 [`load_roll_ic_feed`](../src/quant/cli.py#L149)：baostock 交易日历 → 中金所 IC 各合约（`get_by_month` 按月补拉）→ AKShare 中证 500 →（对冲时）510500，合成一个 `InMemoryDataFeed`。对冲时交易日历与 510500 从回测起点往前多取 3 × 波动率窗口 + 10 个自然日，期权模型价在回测首日就有完整的波动率窗口，并把已公布日历之后的工作日追加进日历（见 [§14](#14-阅读时容易忽略的细节)）。
 
 关键点：引擎拿到的 `InMemoryDataFeed` 里已经没有任何 baostock、中金所、AKShare 或缓存的痕迹，后面的阶段完全不知道数据从哪来。
 
@@ -536,7 +552,7 @@ sequenceDiagram
         E->>R: after_close(symbol, day, bar 或 None, portfolio)
         Note over R,P: 股票：记收盘价；期货：按结算价盯市、更新保证金，<br/>到期日仍持仓则强制平仓并返回 Alert；<br/>期权：记模型价，到期日按内在价值结算并返回 Alert
     end
-    E->>E: ⑤ 记录快照 cash / market_value / margin / nav / positions
+    E->>E: ⑤ 记录快照 cash / market_value / margin / nav / interest / positions
 ```
 
 注意几点：
@@ -558,15 +574,17 @@ sequenceDiagram
     opt roll_ic
         CLI->>M: basis_table(result, feed, 中证 500)
         M-->>CLI: 每日 contract / basis / annualized_discount
+        CLI->>M: delta_table、return_breakdown、split_metrics（对冲时）
+        M-->>CLI: 每日净 delta、收益拆解、按 2022-09-19 分段的指标
     end
     CLI->>M: compute_metrics(result, feed, 基准代码)
     Note over M: 内部会调用一次 buy_and_hold_nav，<br/>用来算基准收益和超额收益
     M-->>CLI: metrics dict
     CLI->>M: buy_and_hold_nav(feed, symbol, 交易日, 初始资金)
     M-->>CLI: 基准净值序列（画图、写 daily.csv 用）
-    CLI->>RP: write_report(out_dir, title, result, benchmark, metrics, extra_daily, labels)
-    Note over RP: 写出 fills.csv、rejections.csv、alerts.csv、<br/>daily.csv（并入 extra_daily）、metrics.json、nav.png
-    CLI->>RP: format_metrics、format_rejections、format_alerts
+    CLI->>RP: write_report(out_dir, title, result, benchmark, metrics, extra_daily, labels, comparisons)
+    Note over RP: 写出 fills.csv、rejections.csv、alerts.csv、<br/>daily.csv（并入 extra_daily）、metrics.json、<br/>nav.png（含对照曲线；有 net_delta_ratio 时下方加净 delta 栏）
+    CLI->>RP: format_metrics、format_segments、format_breakdown、format_rejections、format_alerts
     RP-->>CLI: 指标文本、未成交汇总、警告列表，打印到终端
 ```
 
@@ -667,7 +685,7 @@ flowchart TD
 
 - [`load_cffex_bars`](../src/quant/data/cffex_feed.py#L27)：直接下载中金所官网的月度数据包 `historysj/<YYYYMM>/zip/<YYYYMM>.zip`，里面每个交易日一个 GBK 编码的 CSV。只保留 `IC\d{4}` 形式的期货合约（排除同前缀的期权和小计行），取「合约代码、今开盘、最高价、最低价、今收盘、今结算」。无成交合约的开高低为空，用收盘价补齐；结算价缺失记为 `None`，当日不盯市。spec 原定走 AKShare，但 AKShare 读的是同一个数据包，却逐日请求、每次重下整月 zip，且写死的浏览器 User-Agent 在部分网络下会被安全网关拦截后静默返回空表，所以改为直接读取（见 `design.md` 第 10 节）。
 - [`load_index_bars`](../src/quant/data/akshare_feed.py#L14)：AKShare `stock_zh_index_daily`（新浪）一次返回全部历史，按区间截取。代码用 baostock 风格的 `sh.000905`。
-- [`load_etf_bars`](../src/quant/data/akshare_feed.py#L37)：AKShare `fund_etf_hist_sina` 取不复权日线，`fund_etf_dividend_sina` 取累计分红，按「除息日因子 × 前收 / (前收 − 每份分红)」从上市起累乘出后复权因子（期权的已实现波动率用后复权价，避免除息缺口）。baostock 也有 510500，但它给的复权因子在 2024-05 无故跳到 0.326，不可用。份额折算（510500 在 2015-04 的折算）不在分红表里，未处理。目前还没有 CLI 入口调用它，06 接入。
+- [`load_etf_bars`](../src/quant/data/akshare_feed.py#L37)：AKShare `fund_etf_hist_sina` 取不复权日线，`fund_etf_dividend_sina` 取累计分红，按「除息日因子 × 前收 / (前收 − 每份分红)」从上市起累乘出后复权因子（期权的已实现波动率用后复权价，避免除息缺口）。baostock 也有 510500，但它给的复权因子在 2024-05 无故跳到 0.326，不可用。份额折算（510500 在 2015-04 的折算）不在分红表里，未处理。`roll_ic` 对冲时经 `load_roll_ic_feed` 调用它。
 
 缓存目录结构：
 
@@ -688,12 +706,12 @@ data_cache/baostock/
 
 ## 7. 回测引擎详解
 
-[`engine.run_backtest`](../src/quant/engine.py#L58) 是整个项目的心脏。它维护的局部状态：
+[`engine.run_backtest`](../src/quant/engine.py#L62) 是整个项目的心脏。它维护的局部状态：
 
 | 变量 | 类型 | 含义 |
 | --- | --- | --- |
 | `portfolio` | `Portfolio` | 账户状态 |
-| `rules_for` | `_Dispatcher` | 按代码选规则对象：[`is_future`](../src/quant/instruments/future.py#L22) 为真 → `FutureRules`，[`is_option`](../src/quant/instruments/option.py#L24) 为真 → `OptionRules`，否则 `StockRules`；每次回测新建，规则对象里按品种记的状态不会跨回测残留 |
+| `rules_for` | `_Dispatcher` | 按代码选规则对象：[`is_future`](../src/quant/instruments/future.py#L22) 为真 → `FutureRules`，[`is_option`](../src/quant/instruments/option.py#L24) 为真 → `OptionRules`，否则 `StockRules`；每次回测新建，规则对象里按品种记的状态不会跨回测残留。`rules_for.quote(day, symbol)` 供 `Context.bar` 按需取 universe 外的行情 |
 | `history` | `dict[symbol, list[(date, Bar)]]` | 每个品种截至当日的 bar，`Context.history(symbol)` 返回其副本 |
 | `pending` | `list[Order]` | 开盘成交品种（股票）在信号日产生、等待下一交易日开盘撮合的订单 |
 | `fills` / `rejections` / `alerts` | `list` | 全部成交（含到期强平）、未成交订单及原因、警告 |
@@ -716,13 +734,13 @@ flowchart TD
     HasBar -- 否 --> S4
     HasBar -- 是 --> S3["<b>步骤 3 收盘调用策略</b><br/>orders = strategy.on_bar(Context 快照)<br/>fills_at_close 为假 → pending；为真 → 当日 match + apply"]
     S3 --> S4["<b>步骤 4 收盘后</b><br/>每个有 bar 或有持仓的品种：rules_for(s).after_close(...)<br/>强平成交并入 fills，警告并入 alerts 并打日志"]
-    S4 --> Snap["<b>步骤 5 记录快照</b><br/>market_value = Σ rules.market_value（期货为 0，盈亏已在现金里；期权为张数 × 模型价 × 乘数）<br/>margin = Σ 保证金占用；nav = cash + market_value"]
+    S4 --> Snap["<b>步骤 5 记录快照</b><br/>market_value = Σ rules.market_value（期货为 0，盈亏已在现金里；期权为张数 × 模型价 × 乘数）<br/>margin = Σ 保证金占用；nav = cash + market_value；interest = 步骤 0 计入的利息"]
     Snap --> Next{还有交易日?}
     Next -- 是 --> Start
     Next -- 否 --> Out(["BacktestResult(daily, fills, rejections, alerts)"])
 ```
 
-源码中六个步骤都有编号注释：[步骤 0](../src/quant/engine.py#L89)、[步骤 1](../src/quant/engine.py#L94)、[步骤 2](../src/quant/engine.py#L98)、[步骤 3](../src/quant/engine.py#L109)、[步骤 4](../src/quant/engine.py#L122)、[步骤 5](../src/quant/engine.py#L132)。
+源码中六个步骤都有编号注释：[步骤 0](../src/quant/engine.py#L93)、[步骤 1](../src/quant/engine.py#L99)、[步骤 2](../src/quant/engine.py#L103)、[步骤 3](../src/quant/engine.py#L114)、[步骤 4](../src/quant/engine.py#L128)、[步骤 5](../src/quant/engine.py#L138)。
 
 ### 7.2 一天之内的时间轴
 
@@ -851,7 +869,7 @@ flowchart LR
     P1 -->|"步骤 3 快照<br/>收盘 12"| D["daily 行<br/>cash 1,000, market_value 108,000<br/>nav 109,000"]
 ```
 
-`accrue_interest` 是单利按段复利：每段 `cash += (cash − 保证金占用) × rate × days / 365`，跨多段时自然形成复利；没有期货持仓时与 `cash *= 1 + rate × days / 365` 相同。
+`accrue_interest` 是单利按段复利：每段 `cash += (cash − 保证金占用) × rate × days / 365`，跨多段时自然形成复利；没有期货持仓时与 `cash *= 1 + rate × days / 365` 相同。它返回当段利息，引擎记进快照的 `interest` 列，收益拆解里的「现金利息」就是这一列之和。
 
 ### 8.3 期货：`FutureRules` 与逐日盯市
 
@@ -875,7 +893,7 @@ flowchart LR
 
 ### 8.4 期权：`OptionRules` 与模型价
 
-期权和股票、期货最大的不同是**没有自己的行情**。`DataFeed` 里只有标的 510500 的 bar，期权的当日 bar 由 [`OptionRules.quote`](../src/quant/instruments/option.py#L73) 现算：开高低收都等于 BS 模型价（ADR-0002）。引擎因此把取行情也交给规则对象（协议成员 `quote`），股票、期货的 `quote` 就是 `feed.bar`。
+期权和股票、期货最大的不同是**没有自己的行情**。`DataFeed` 里只有标的 510500 的 bar，期权的当日 bar 由 [`OptionRules.quote`](../src/quant/instruments/option.py#L96) 现算：开高低收都等于 BS 模型价（ADR-0002）。引擎因此把取行情也交给规则对象（协议成员 `quote`），股票、期货的 `quote` 就是 `feed.bar`。
 
 ```mermaid
 flowchart LR
@@ -887,12 +905,13 @@ flowchart LR
     BS --> Bar["Bar(开高低收 = 模型价)"]
 ```
 
-- **合约代码**（[`parse_option`](../src/quant/instruments/option.py#L36)）：沿用上交所合约交易代码的格式，标的代码 + `P` + 年月 + `M` + 行权价（厘，5 位）。只认 put；标的映射到 `sh.` + 标的代码。
-- **撮合**（[`match`](../src/quant/instruments/option.py#L104)）：按当日模型价成交，无滑点；每张收 `fee_per_contract`（2 元），买卖都收。只支持买方：买入必须给出张数，要求 `权利金 + 费用 ≤ 现金 − 保证金占用`；卖出平仓，无持仓记「无持仓」。权利金现金交割（`Portfolio.apply`，乘数 10000），不交保证金。
+- **合约代码**（[`parse_option`](../src/quant/instruments/option.py#L36)，逆操作 [`option_symbol`](../src/quant/instruments/option.py#L45)）：沿用上交所合约交易代码的格式，标的代码 + `P` + 年月 + `M` + 行权价（厘，5 位）。只认 put；标的映射到 `sh.` + 标的代码。
+- **撮合**（[`match`](../src/quant/instruments/option.py#L126)）：按当日模型价成交，无滑点；每张收 `fee_per_contract`（2 元），买卖都收。只支持买方：买入必须给出张数，要求 `权利金 + 费用 ≤ 现金 − 保证金占用`；卖出平仓，无持仓记「无持仓」。权利金现金交割（`Portfolio.apply`，乘数 10000），不交保证金。
 - **无报价**：已过到期日、标的当日无 bar，或到期前截至当日的标的历史不足 21 个收盘价（波动率窗口 + 1），`quote` 返回 `None`，当日订单记「无行情」。
-- **估值**（[`after_close`](../src/quant/instruments/option.py#L130)、`market_value`）：每天收盘记下模型价，`market_value` = 张数 × 模型价 × 10000。标的某天缺数据时沿用上一次的模型价。
+- **估值**（[`after_close`](../src/quant/instruments/option.py#L152)、`market_value`）：每天收盘记下模型价，`market_value` = 张数 × 模型价 × 10000。标的某天缺数据时沿用上一次的模型价。
 - **到期**：`day ≥ expiry(symbol)` 时剩余期限为 0，模型价就是内在价值 max(K − S, 0)；按它卖出结算，**不收费用**，返回 `Alert`（到期日标的缺行情时只能沿用最近一次模型价，警告里注明）。虚值到期即以 0 结算，账户的总成本就是权利金加买入费用。
-- **纯函数**：[`put_price`](../src/quant/pricing.py#L22)、[`put_delta`](../src/quant/pricing.py#L31)、[`strike_at_or_below`](../src/quant/calendars.py#L62)（行权价网格向下取最近一档：3 元以下间距 0.05，3–5 元 0.1，5–10 元 0.25，10–20 元 0.5，20–50 元 1，50–100 元 2.5，100 元以上 5）是 06 的对冲策略要直接调用的公开函数，单独有测试（`test_pricing.py`）。
+- **纯函数**：[`put_price`](../src/quant/pricing.py#L22)、[`put_delta`](../src/quant/pricing.py#L34)（波动率为 0 时按贴现后的远期内在价值处理，标的连续 21 天不变也不会除零）、[`implied_vol`](../src/quant/pricing.py#L46)（由价格二分反推波动率）、[`strike_at_or_below`](../src/quant/calendars.py#L62)（行权价网格向下取最近一档：3 元以下间距 0.05，3–5 元 0.1，5–10 元 0.25，10–20 元 0.5，20–50 元 1，50–100 元 2.5，100 元以上 5）是对冲策略直接调用的公开函数，单独有测试（`test_pricing.py`）。
+- **每张 delta 敞口**（[`delta_exposure`](../src/quant/instruments/option.py#L65)）：乘数 × 标的价 × put delta（元，≤ 0）。波动率由当日模型价经 `implied_vol` 反推，所以策略不用知道模型价用的是哪个波动率；剩余期限与 `quote` 一致按自然日 / 365。
 
 ## 9. 策略接口与策略实现
 
@@ -902,7 +921,7 @@ flowchart LR
 flowchart LR
     subgraph Context["Context（只读快照）"]
         D[day 信号日]
-        B["bar(symbol)<br/>当日 universe 内的 bar"]
+        B["bar(symbol)<br/>当日 universe 内的 bar；<br/>universe 外按需现取当日行情"]
         H["history(symbol)<br/>[(date, Bar), ...] 截至 day（含）"]
         TD["trading_days(start, end)<br/>交易日历，可查未来日期"]
         CA[cash]
@@ -912,7 +931,7 @@ flowchart LR
     OB --> L["list[Order]<br/>空列表 = 不操作"]
 ```
 
-策略每天先由 `universe(day)` 声明需要哪些品种的行情（双均线是自己的股票，滚 IC 是最近两个季月合约），引擎再加上持仓和待撮合订单里的品种。
+策略每天先由 `universe(day)` 声明需要哪些品种的行情（双均线是自己的股票，滚 IC 是最近两个季月合约，对冲时再加 510500），引擎再加上持仓和待撮合订单里的品种。收盘时才能确定的品种（如按当日 ETF 收盘价选出的平值 put）不必提前声明，`ctx.bar(symbol)` 会经引擎的品种规则按需取当日行情。
 
 策略**拿不到未来数据**的保证来自引擎：`history` 只在 bar 到达后才 append，`Context` 是在 append 之后、下一天之前构造的；`bars` 只有当日的。策略拿不到 `feed`，唯一能看到「未来」的是交易日历——它是事先公布的公开信息，滚 IC 要用它数到期前还剩几个交易日。
 
@@ -948,30 +967,55 @@ stateDiagram-v2
     持仓 --> 持仓: 金叉（已持仓，忽略）
 ```
 
-### 9.3 `RollIC.on_bar`：纯滚 IC
+### 9.3 `RollIC.on_bar`：滚 IC
 
-[`roll_ic.py:30`](../src/quant/strategies/roll_ic.py#L30)
+[`roll_ic.py:50`](../src/quant/strategies/roll_ic.py#L50)
 
 ```mermaid
 flowchart TD
     In([on_bar ctx]) --> T["target = current_contract(ctx)<br/>最近两个季月合约中，第一个<br/>距到期交易日数 > roll_days 的"]
-    T --> Same{"持有的 IC 恰好只有 target?"}
-    Same -- 是 --> E0(["返回 []"])
-    Same -- 否 --> Bar{"target 当日有 bar?"}
+    T --> Bar{"target 当日有 bar?"}
     Bar -- 否 --> E1(["返回 []，下一交易日再试"])
     Bar -- 是 --> Lots["lots = 已持有手数之和<br/>（空仓时 floor(现金 / (收盘价 × 乘数))）"]
-    Lots --> Out(["[SELL 每个旧合约（全部）, BUY target × lots]"])
+    Lots --> Same{"持有的 IC 恰好只有 target?"}
+    Same -- 否 --> Roll["IC 订单：SELL 每个旧合约（全部）、BUY target 补足 lots"]
+    Same -- 是 --> H
+    Roll --> H{"hedge 不为 None?"}
+    H -- 否 --> Out(["返回 IC 订单"])
+    H -- 是 --> HO(["IC 订单 + hedge_orders(ctx, lots × 乘数 × target 收盘价)<br/>见 §9.4"])
 ```
 
 - 「距到期交易日数」= `len(ctx.trading_days(day + 1 天, 到期日))`，即 (day, 到期日] 内的交易日。`roll_days = 5` 时，2024-12-20 到期的 IC2412 在 12-13 展期；回测起点已在展期窗口内时直接开下一个季月合约。
 - 展期在同一天先平后开，期货当日收盘成交，平仓释放的保证金正好够开新仓。
 - 手数只在首次建仓时按 1 倍名义本金计算，之后展期保持不变（ticket 04 的约定）。净值增长后名义敞口占净值的比例会下降。
 
+### 9.4 `RollIC.hedge_orders`：put 对冲到 delta 中性
+
+[`roll_ic.py:78`](../src/quant/strategies/roll_ic.py#L78)。参数在 [`PutHedge`](../src/quant/strategies/roll_ic.py#L30)：`option`（取 `BacktestConfig.option`，算 delta 用）、`threshold`（默认 10%）、`roll_days`（put 换月，默认 5）、`underlying`（`sh.510500`）。
+
+```mermaid
+flowchart TD
+    In(["hedge_orders(ctx, ic_delta)<br/>ic_delta = IC 名义本金（IC 订单成交后）"]) --> E{"510500 当日有 bar?"}
+    E -- 否 --> N0(["[]"])
+    E -- 是 --> Held{"恰好持有一个 put，<br/>且距到期 > roll_days 个交易日?"}
+    Held -- "否（建仓 / 换月）" --> K
+    Held -- 是 --> Th{"|ic_delta + 张数 × 每张 delta 敞口|<br/>> threshold × ic_delta?"}
+    Th -- 否 --> N1(["[]"])
+    Th -- 是 --> K["put = option_symbol(510500, 当日的次月, strike_at_or_below(ETF 收盘价))<br/>每张敞口 = delta_exposure(put, ctx.bar(put).close, ...)"]
+    K --> Q["SELL 其余持有的 put（全部）<br/>put 张数调到 round(ic_delta / −每张敞口)"]
+```
+
+- **净 delta** 都按名义本金折算（元）：IC 为手数 × 200 × IC 收盘价；put 为张数 × 10000 × ETF 收盘价 × delta。模块级的 [`net_delta`](../src/quant/strategies/roll_ic.py#L124) 用同一套算法，`metrics.delta_table` 用它算每日实际持仓的净 delta。
+- **再平衡按同一规则重选 put**（ADR-0004）：建仓、换月、再平衡都选「当日的次月、平值」put，选出的就是持有的 put 时只调张数，否则平掉旧 put、买入新 put。若只调张数，ETF 大涨后旧 put 深度虚值、或临近到期向下取一档的 put 偏虚值时 delta 趋近 0，`ic_delta / 每张敞口` 会算出几百万张（2016-07 真实数据中出现过），见测试 `test_rebalance_after_a_large_move_switches_to_the_next_month_at_the_money_put`、`test_rebalance_in_the_expiry_month_moves_to_the_next_month_put_instead_of_a_short_dated_one`。
+- **取整误差在一张以内**：张数四舍五入，阈值为 0 时只要张数有变化就每日调整。
+- **订单顺序**：先 IC（展期），再卖旧 put、买新 put，引擎按顺序撮合，卖出释放的现金可用于买入。IC 展期当天手数不变，IC 名义本金只随合约价格变化（贴水使下一季月合约略便宜），通常不触发再平衡。
+- 2022-09-19（500ETF 期权上市）之前的 put 是假设品种，按同一个模型价交易。
+
 ## 10. 绩效指标与报告
 
 ### 10.1 `compute_metrics`
 
-[`metrics.py:46`](../src/quant/metrics.py#L46)，输入 `BacktestResult` 与 `feed`（用于算基准）。
+[`metrics.py:114`](../src/quant/metrics.py#L114)，输入 `BacktestResult` 与 `feed`（用于算基准）。给出 `start` / `end` 时只统计该区间：净值与基准以区间前一个交易日的收盘为起点（所以分段收益能连乘回全区间收益），成交额、费用按成交日归属，往返交易按卖出日归属。[`split_metrics`](../src/quant/metrics.py#L152) 以某一天为界分两段调用它，CLI 用 500ETF 期权上市日 2022-09-19 分段。
 
 | 指标 | 公式 | 函数 |
 | --- | --- | --- |
@@ -979,15 +1023,31 @@ flowchart TD
 | 年化收益 | `(nav[-1]/nav[0])^(1/years) − 1`，`years = 自然日数 / 365` | `_annualize` |
 | 最大回撤 | `max(1 − nav / cummax(nav))` | `_max_drawdown` |
 | 夏普 | 日收益减 `rf/252`，`mean / std × √252` | `_sharpe` |
-| 胜率 / 交易次数 | 每笔卖出算一次交易，按平均成本（含买入费用）比较卖出净所得 | `_round_trip_wins` |
+| 胜率 / 交易次数 | 每笔卖出算一次交易，按平均成本（含买入费用）比较卖出净所得 | `_round_trips` |
 | 年化换手率 | `Σ(数量 × 价格 × 乘数) / 2 / 平均净值 / years`，期货按名义本金 | — |
 | 总费用 | `Σ fee` | — |
 | 基准收益 | 首日按**后复权收盘价**全额持有到最后一日，不计费用 | `buy_and_hold_nav` |
 | 年化超额 | 策略年化 − 基准年化 | — |
 
-`_round_trip_wins` 维护每个标的的「持仓数量」和「总成本」两个累计量（金额都含合约乘数）：买入时两者都加；卖出时按 `卖出股数 / 持股数` 比例结转成本，`卖出金额 − 卖出费用 − 结转成本 > 0` 记为盈利。
+`_round_trips` 维护每个标的的「持仓数量」和「总成本」两个累计量（金额都含合约乘数）：买入时两者都加；卖出时按 `卖出股数 / 持股数` 比例结转成本，`卖出金额 − 卖出费用 − 结转成本 > 0` 记为盈利。
 
-**基差与年化贴水率**（[`basis_table`](../src/quant/metrics.py#L25)）：每天取收盘后持有的期货合约，基差 = 期货收盘价 − 指数收盘价，年化贴水率 = −基差 / 指数收盘价 × 365 / 距到期自然日数（贴水为正）。未持仓或缺行情的日子为 NaN。CLI 只在 `roll_ic` 时计算，经 `write_report(extra_daily=...)` 并入 `daily.csv`。
+**基差与年化贴水率**（[`basis_table`](../src/quant/metrics.py#L29)）：每天取收盘后持有的期货合约，基差 = 期货收盘价 − 指数收盘价，年化贴水率 = −基差 / 指数收盘价 × 365 / 距到期自然日数（贴水为正）。未持仓或缺行情的日子为 NaN。CLI 只在 `roll_ic` 时计算，经 `write_report(extra_daily=...)` 并入 `daily.csv`。
+
+**每日净 delta**（[`delta_table`](../src/quant/metrics.py#L50)）：按每天收盘后的实际持仓（不是策略的计划）算 `net_delta`（元）与 `net_delta_ratio`（÷ IC 名义本金），put 行情由一个新建的 `OptionRules` 现算。
+
+**收益拆解**（[`return_breakdown`](../src/quant/metrics.py#L67)），假设组合只含期货与期权，各项都是对总盈亏的贡献（元）：
+
+| 项 | 算法 |
+| --- | --- |
+| 总盈亏 `total_pnl` | 期末净值 − 初始资金 |
+| 交易费用 `fees` | −Σ fee |
+| 现金利息 `interest` | Σ `daily.interest` |
+| put 盈亏 `put_pnl` | Σ 卖出权利金 − Σ 买入权利金 + 期末 put 市值（不含费用） |
+| IC 随指数涨跌 `ic_index_pnl` | Σ 前一交易日收盘的 IC 手数 × 乘数 × 当日中证 500 收盘价变化 |
+| 贴水收敛 `discount_convergence` | IC 盈亏（= 总盈亏 − put 盈亏 − 费用 − 利息）− `ic_index_pnl`，即基差变化的贡献；期货滑点也在这一项 |
+| 指数涨跌与 put `hedge_cost` | `put_pnl + ic_index_pnl`：delta 中性时两者大体相抵，剩下的就是 put 的对冲成本（时间价值流失与对冲误差） |
+
+贴水收敛 + 指数涨跌与 put + 交易费用 + 现金利息 = 总盈亏。贴水收敛按残差算，所以这个等式恒成立；测试另外独立核对了贴水收敛与指数涨跌的数值。纯滚 IC 也用同一张表（put 盈亏为 0，这一项就是 IC 的指数敞口）。
 
 ### 10.2 输出文件
 
@@ -997,21 +1057,22 @@ flowchart LR
     R --> RC["rejections.csv<br/>date, symbol, side, quantity, reason"]
     R --> AC["alerts.csv<br/>date, symbol, message"]
     R --> RT["终端打印<br/>format_rejections：按原因计数<br/>format_alerts：逐条警告"]
-    R --> DC["daily.csv<br/>date, cash, market_value, margin, nav,<br/>positions(JSON), benchmark_nav<br/>（roll_ic 另有 contract, basis, annualized_discount）"]
-    BT[basis_table] --> DC
+    R --> DC["daily.csv<br/>date, cash, market_value, margin, nav, interest,<br/>positions(JSON), benchmark_nav<br/>（roll_ic 另有 contract, basis, annualized_discount；<br/>对冲时再加 net_delta, net_delta_ratio, unhedged_nav）"]
+    BT[basis_table / delta_table] --> DC
     M[metrics dict] --> MJ[metrics.json]
-    R --> NP["nav.png<br/>策略 vs 基准（都归一到 1；roll_ic 为纯滚 IC vs 中证 500 买入持有）"]
+    R --> NP["nav.png<br/>策略 + 对照曲线 + 基准（都归一到 1）；<br/>roll_ic 对冲时为本策略、纯滚 IC、中证 500 三条，<br/>下方一栏净 delta / IC 名义本金，标题标注期权价格为模型价"]
     B[benchmark Series] --> NP
     B --> DC
-    M --> TXT["终端打印<br/>format_metrics"]
+    M --> TXT["终端打印<br/>format_metrics、format_segments（分段指标）、<br/>format_breakdown（收益拆解）"]
 ```
 
-输出目录名：`output/ma_cross_<symbol>_<start:%Y%m%d>_<end:%Y%m%d>/`、`output/roll_ic_nohedge_<start>_<end>/`；CSV 用 `utf-8-sig` 编码，方便 Excel 直接打开中文。
+输出目录名：`output/ma_cross_<symbol>_<start:%Y%m%d>_<end:%Y%m%d>/`、`output/roll_ic_hedge_<start>_<end>/`、`output/roll_ic_nohedge_<start>_<end>/`；CSV 用 `utf-8-sig` 编码，方便 Excel 直接打开中文。对冲时 `metrics.json` 另有 `note`（期权价格为模型价、2022-09-19 前的 put 是假设品种）、`segments`（分段指标）、`breakdown`（本策略与纯滚 IC 的收益拆解）。
 
 ## 11. 命令行与配置覆盖
 
 ```bash
 backtest ma_cross --symbol sz.000001 --start 2018-01-01 --fast 10 --slow 60 --set cash_rate=0.02 --set stock.commission_rate=0.0003
+backtest roll_ic --hedge-threshold 0 --put-roll-days 3 --set option.vol_premium=1.2
 backtest roll_ic --no-hedge --roll-days 3 --set future.margin_rate=0.12
 ```
 
@@ -1022,13 +1083,15 @@ backtest roll_ic --no-hedge --roll-days 3 --set future.margin_rate=0.12
 | `--start` / `--end` | 2016-01-01 / 今天 | |
 | `--cash` | 3,000,000 | 初始资金 |
 | `--fast` / `--slow` | 5 / 20 | `ma_cross` 均线周期 |
-| `--no-hedge` | — | `roll_ic` 必须加：只滚 IC，不用 put 对冲（对冲版本是 ticket 06） |
+| `--no-hedge` | — | `roll_ic` 只滚 IC，不用 put 对冲（默认对冲，并同时跑纯滚 IC 作对照） |
 | `--roll-days` | 5 | `roll_ic` 在到期前多少个交易日展期 |
+| `--hedge-threshold` | 0.10 | `roll_ic` 净 delta 超过 IC 名义本金的这个比例时再平衡，0 即每日再平衡 |
+| `--put-roll-days` | 5 | `roll_ic` put 到期前多少个交易日换月 |
 | `--set KEY=VALUE` | — | 可重复，覆盖 `BacktestConfig` 任意嵌套字段 |
 | `--cache-dir` | `data_cache` | |
 | `--out` | `output` | |
 
-`--set` 的实现（[`_replace_path`](../src/quant/cli.py#L121)）是沿点号路径递归 `dataclasses.replace`：
+`--set` 的实现（[`_replace_path`](../src/quant/cli.py#L178)）是沿点号路径递归 `dataclasses.replace`：
 
 ```mermaid
 flowchart TD
@@ -1065,7 +1128,7 @@ flowchart LR
 - 测试中的策略都是几行的「脚本策略」（如 `BuyOnceOnFirstDay`、`BuyThenSellAll`、`test_stock_rules.py` 的 `Script`），按 `len(ctx.history(SYMBOL))` 或 `ctx.day` 决定哪天下单，让场景可手算；每个测试策略都要实现 `universe`。
 - 联网测试打 `@pytest.mark.network`，默认跳过，`pytest --run-network` 启用。
 - 例外：[`test_cache.py`](../tests/test_cache.py) 直接用假数据源驱动 `ParquetCache`，验证断点续拉——这是数据层自己的行为，经 `DataFeed` 观察不到。
-- 例外：[`test_pricing.py`](../tests/test_pricing.py) 直接测 BS 模型价、delta 和行权价网格——它们是 06 的策略要直接调用的公开纯函数，delta 也不出现在回测结果里。期权的成交、估值、到期结算仍经引擎测（`test_option_rules.py`）。
+- 例外：[`test_pricing.py`](../tests/test_pricing.py) 直接测 BS 模型价、delta、反推波动率和行权价网格——它们是对冲策略直接调用的公开纯函数。期权的成交、估值、到期结算仍经引擎测（`test_option_rules.py`），对冲逻辑经引擎 + `metrics.delta_table` / `return_breakdown` 测（`test_roll_ic_hedge.py`，期望的 delta 由测试按已知波动率独立算出）。
 
 现有测试覆盖的引擎语义：
 
@@ -1089,7 +1152,8 @@ flowchart LR
 | `test_future_rules.py` 各测试 | 当日收盘成交与结算价盯市、名义本金按乘数 200、保证金 14%、平今万 2.3 / 平昨万 0.23、到期强平与警告、第三个周五遇节假日顺延、资金不足拒绝开仓、保证金不计息 |
 | `test_roll_ic.py` 各测试 | 按 1 倍名义本金建仓当季合约、到期前 5 个交易日展期且手数不变、展期天数可配置、起点在展期窗口内、基差与年化贴水率、`daily.csv` 的 margin / basis 列 |
 | `test_option_rules.py` 各测试 | 虚值到期归零、现金变化 = 权利金 + 费用；实值到期按 ETF 收盘价的内在价值结算；第四个星期三遇春节顺延；持仓每日按模型价估值，随时间衰减、随 ETF 下跌升值；资金不足拒单；标的历史不足波动率窗口时无行情 |
-| `test_pricing.py` 各测试 | 行权价网格各档；put 模型价满足无套利边界、与手算值一致、到期等于内在价值；delta 在 −1 到 0 之间、平值接近 −0.5 |
+| `test_pricing.py` 各测试 | 行权价网格各档；put 模型价满足无套利边界、与手算值一致、到期等于内在价值、零波动率等于远期内在价值；delta 在 −1 到 0 之间、平值接近 −0.5；由模型价反推回波动率 |
+| `test_roll_ic_hedge.py` 各测试 | 建仓买次月平值 put、净 delta 误差在一张以内；超过阈值才再平衡、阈值 0 每日再平衡；选出的 put 不变时只调张数、大幅波动后与到期月内再平衡时重选次月平值 put；put 到期前 5 个交易日换到新的次月平值合约；IC 展期当天 put 不动、净 delta 在阈值内；收益拆解之和等于总盈亏并分开贴水收敛与指数涨跌；分段指标连乘等于全区间；`daily.csv` 的净 delta 列 |
 | `test_futures_round_trip_is_judged_on_notional_including_multiplier` | 期货胜率与换手率按名义本金计 |
 | `test_interrupted_first_fetch_resumes_from_unfinished_month` | 首次按月拉取中断后从未完成的月份继续 |
 | `test_ic_data_smoke.py`（联网） | 中金所 IC 分合约 bar 带结算价、AKShare 中证 500 日线 |
@@ -1130,7 +1194,7 @@ sequenceDiagram
 ## 14. 阅读时容易忽略的细节
 
 1. **品种按代码分派**：只认 `IC` + 四位数字为期货、`510500P2412M05500` 这种上交所交易代码为期权（只认 put），其余一律按股票处理（指数 `sh.000905` 也走 `StockRules`，但策略从不对它下单）。IF / IH 乘数是 300，要等 `FutureConfig` 按品种区分后才能加。
-2. **交易日历要覆盖到期日**：滚 IC 数「到期前还剩几个交易日」、`FutureRules` 判断到期，都查 `feed.trading_days` 的未来日期。CLI 在已公布的日历之后追加 200 天的工作日（忽略未来节假日）；回测本身只推进到最后一个已公布的交易日。测试里同样要把日历延伸出去，否则下一个季月合约的到期日超出日历，会按未顺延的第三个周五计、交易日也数不够。
+2. **交易日历要覆盖到期日**：滚 IC 数「到期前还剩几个交易日」（put 换月同理）、`FutureRules` 判断到期，都查 `feed.trading_days` 的未来日期。CLI 在已公布的日历之后追加 200 天的工作日（忽略未来节假日）；回测本身只推进到最后一个已公布的交易日。测试里同样要把日历延伸出去，否则下一个季月合约的到期日超出日历，会按未顺延的第三个周五计、交易日也数不够。
 3. **没有 bar 的交易日**：品种当日无 bar 时，它的股票 `pending` 订单保留到下一个有 bar 的日子；期货、期权订单记「无行情」；所有品种都无 bar 时不调用策略——只把期权放进 universe、而它当日无报价时，策略当天不会被调用，要把标的 ETF 也放进 universe。估值用规则对象里记的旧收盘价，并照常计息。
 4. **估值用不复权收盘价，基准用后复权价**：两者能对上，靠的是除权日按因子比例放大持股数。这是分红再投资的近似：不计红利税、取整到整股；且基准从首日收盘起算，策略要到次日开盘才买入、还剩不足整手的现金，所以净值与基准不会完全重合。
 5. **被拒的订单不顺延**：记一条 `Rejection` 后订单就结束了，不会挂到下一交易日再试。双均线只在交叉当天发信号，所以开盘涨停没买到的那次金叉就错过了，这符合「次日开盘一次性撮合」的设定。
@@ -1145,4 +1209,7 @@ sequenceDiagram
 14. **滚 IC 手数不随净值调整**：只在首次建仓时按 1 倍名义本金定手数，之后展期保持不变。2016–2026 的真实回测里净值翻倍，到期末名义敞口只剩净值的一半左右。
 15. **基差用收盘价**：`basis_table` 用期货与指数的收盘价，不用结算价；年化贴水率按距到期的**自然日**折算。
 16. **期权的已实现波动率用到「当日」收盘价**：模型价在收盘时计算，波动率窗口包含当日收益率，这和期权当日收盘成交（ADR-0003）一致，不是未来函数。
-17. **510500 的数据还没接进 CLI**：`load_etf_bars` 已就绪，回测要从起点往前多取一个波动率窗口（约 30 个自然日以上）的 ETF 数据，否则开头几周没有期权报价；这在 06 接入。ADR-0002 要求的报告标注「期权价格为模型价」也随 06 进报告，目前报告里还没有。
+17. **510500 与交易日历往前多取一段**：`load_roll_ic_feed` 对冲时从起点往前多取 3 × 波动率窗口 + 10 个自然日，否则开头几周没有期权报价、无法建仓对冲。
+18. **对冲成本受模型价假设左右**：模型波动率 = 已实现波动率 × 1.1，put 的 theta 与对冲中赚到的 gamma 收益大体相当，所以真实回测里对冲成本不大；真实市场的隐含波动率溢价可能更高，`--set option.vol_premium=...` 可做敏感性分析（ADR-0002）。
+19. **收益拆解的 IC 指数部分用中证 500、put 对冲的是 510500**：两者的跟踪误差、ETF 分红都落在「指数涨跌与 put」里；期货滑点落在「贴水收敛」里。
+20. **对冲版要跑两次回测**：`run_roll_ic` 先跑纯滚 IC 再跑对冲版，两者共用同一个 feed，纯滚 IC 的净值进图（第三条曲线）和 `daily.csv` 的 `unhedged_nav` 列。

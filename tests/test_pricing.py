@@ -8,7 +8,7 @@ import math
 import pytest
 
 from quant.calendars import strike_at_or_below
-from quant.pricing import put_delta, put_price
+from quant.pricing import implied_vol, put_delta, put_price
 
 
 @pytest.mark.parametrize("price, strike", [
@@ -52,6 +52,14 @@ def test_put_at_expiry_is_worth_its_intrinsic_value():
     assert put_price(5.4, 5.0, 0.0, R, Q, VOL) == 0.0
 
 
+def test_put_with_zero_volatility_is_worth_its_discounted_forward_intrinsic_value():
+    # σ = 0：到期时标的确定为 S·e^{(r−q)T}，put 价值 = max(K·e^{−rT} − S·e^{−qT}, 0)
+    assert put_price(4.6, 5.0, 1.0, R, Q, 0.0) == pytest.approx(0.4 * math.exp(-0.015))
+    assert put_price(5.4, 5.0, 1.0, R, Q, 0.0) == 0.0
+    assert put_delta(4.6, 5.0, 1.0, R, Q, 0.0) == pytest.approx(-math.exp(-0.015))
+    assert put_delta(5.4, 5.0, 1.0, R, Q, 0.0) == 0.0
+
+
 @pytest.mark.parametrize("spot", [2.0, 4.5, 5.0, 5.5, 9.0])
 def test_put_delta_is_between_minus_one_and_zero(spot):
     assert -1.0 <= put_delta(spot, 5.0, 30 / 365, R, Q, VOL) <= 0.0
@@ -59,3 +67,11 @@ def test_put_delta_is_between_minus_one_and_zero(spot):
 
 def test_at_the_money_put_delta_is_close_to_minus_one_half():
     assert put_delta(5.0, 5.0, 30 / 365, R, Q, VOL) == pytest.approx(-0.5, abs=0.02)
+
+
+def test_implied_vol_recovers_the_volatility_behind_a_model_price():
+    # 已知 S = K = 5、T = 1、σ = 25% 时模型价 0.48998（见上），反推回 25%
+    assert implied_vol(0.48998, 5.0, 5.0, 1.0, R, Q) == pytest.approx(0.25, abs=1e-4)
+    # 虚值、短期限的报价同样能反推
+    price = put_price(5.6, 5.0, 20 / 365, R, Q, 0.4)
+    assert implied_vol(price, 5.6, 5.0, 20 / 365, R, Q) == pytest.approx(0.4, abs=1e-6)

@@ -10,10 +10,10 @@ import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from quant.calendars import option_expiry
+from quant.calendars import TradingDays, option_expiry
 from quant.data.feed import Bar, DataFeed
 from quant.portfolio import Alert, Fill, Portfolio, RejectReason, Rejection
-from quant.pricing import put_price, realized_vol
+from quant.pricing import implied_vol, put_delta, put_price, realized_vol
 from quant.strategy import Order, Side
 
 # 上交所期权合约交易代码，如 510500P2412M05500：标的代码 + P + 两位年份 + 两位月份 + M + 行权价（厘，5 位）。
@@ -42,6 +42,11 @@ def parse_option(symbol: str) -> OptionContract:
     return OptionContract(f"sh.{code}", 2000 + int(yy), int(mm), int(strike) / 1000)
 
 
+def option_symbol(underlying: str, year: int, month: int, strike: float) -> str:
+    """parse_option 的逆：("sh.510500", 2024, 3, 5.5) → "510500P2403M05500"。"""
+    return f"{underlying.split('.')[-1]}P{year % 100:02d}{month:02d}M{round(strike * 1000):05d}"
+
+
 @dataclass(frozen=True)
 class OptionConfig:
     multiplier: int = 10000  # 合约乘数，权利金 = 模型价 × 乘数
@@ -50,6 +55,24 @@ class OptionConfig:
     dividend_yield: float = 0.015
     vol_window: int = 20  # 已实现波动率的窗口（日收益率个数）
     vol_premium: float = 1.1  # 模型波动率 = 已实现波动率 × 溢价系数
+
+    @property
+    def vol_lookback_days(self) -> int:
+        """算波动率要往前看的自然日数：3 倍窗口再加 10 天，足够覆盖春节等长假。"""
+        return 3 * self.vol_window + 10
+
+
+def delta_exposure(symbol: str, day: date, price: float, spot: float, config: OptionConfig,
+                   trading_days: TradingDays) -> float:
+    """每张 put 的 delta 敞口（元，≤ 0）= 乘数 × 标的价 × delta。
+
+    波动率由当日价格反推，使用者不必知道模型价用的波动率；剩余期限与 quote 一致，按自然日 / 365。
+    """
+    c = parse_option(symbol)
+    years = (option_expiry(c.year, c.month, trading_days) - day).days / 365
+    r, q = config.risk_free_rate, config.dividend_yield
+    vol = implied_vol(price, spot, c.strike, years, r, q) if years > 0 else 0.0
+    return config.multiplier * spot * put_delta(spot, c.strike, years, r, q, vol)
 
 
 class OptionRules:
@@ -92,8 +115,7 @@ class OptionRules:
         key = (underlying, day)
         if key not in self._vol:
             n = self.config.vol_window
-            # 往前取 3 倍窗口的自然日，足够覆盖春节等长假
-            days = self.feed.trading_days(day - timedelta(days=3 * n + 10), day)
+            days = self.feed.trading_days(day - timedelta(days=self.config.vol_lookback_days), day)
             closes = [b.adj_close for d in days if (b := self.feed.bar(underlying, d)) is not None][-(n + 1):]
             self._vol[key] = realized_vol(closes) * self.config.vol_premium if len(closes) == n + 1 else None
         return self._vol[key]
