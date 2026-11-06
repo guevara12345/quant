@@ -66,7 +66,8 @@ def strike_at_or_below(price: float) -> float:
     所以向下取整不会落到网格之外。
     """
     milli = round(price * 1000)
-    step = next((s for upper, s in STRIKE_STEPS_MILLI if milli <= upper), STRIKE_STEP_ABOVE_MILLI)
+    step = next((s for upper, s in STRIKE_STEPS_MILLI if milli <=
+                upper), STRIKE_STEP_ABOVE_MILLI)
     return milli // step * step / 1000
 
 
