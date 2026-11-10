@@ -39,7 +39,8 @@ def make_bar(open: float, close: float | None = None, adj_close: float | None = 
 def stock_costs(**overrides: float) -> StockConfig:
     """佣金、印花税、过户费、滑点全为 0 的股票配置，只打开 overrides 指定的项，便于手算。"""
     zero = dict(commission_rate=0.0, min_commission=0.0,
-                stamp_duty_rate=0.0, transfer_fee_rate=0.0, slippage=0.0)
+                stamp_duty_rate=0.0, stamp_duty_rate_before=0.0,
+                transfer_fee_rate=0.0, transfer_fee_rate_before=0.0, slippage=0.0)
     return StockConfig(**{**zero, **overrides})  # type: ignore[arg-type]
 
 

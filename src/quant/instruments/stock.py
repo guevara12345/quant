@@ -2,7 +2,7 @@
 
 检查顺序：停牌 → 涨跌停（开盘价等于涨停价时跳过买单、等于跌停价时跳过卖单）→
 买入按整手取整并检查资金 / 卖出检查持仓与 T+1。没有成交的订单返回 Rejection 并注明原因。
-费用为佣金（有最低额）+ 过户费，卖出另收印花税。除权日持股数按复权因子比例放大、涨跌停以除权参考价为基准（apply_ex_rights）。
+费用为佣金（有最低额）+ 过户费，卖出另收印花税；印花税、过户费按成交日取对应时期的费率。除权日持股数按复权因子比例放大、涨跌停以除权参考价为基准（apply_ex_rights）。
 """
 
 from __future__ import annotations
@@ -25,8 +25,14 @@ STAR_PREFIXES = ("688", "689")  # 沪市科创板
 class StockConfig:
     commission_rate: float = 0.00025
     min_commission: float = 5.0
-    stamp_duty_rate: float = 0.0005  # 印花税，只在卖出时收取
-    transfer_fee_rate: float = 0.00001  # 过户费，买卖双向
+    # 印花税只在卖出时收取，过户费买卖双向；成交日早于切换日时用 *_before 费率。
+    # 不覆盖 2008-09-19 印花税改单边之前、过户费 2015-08-01 统一按成交额收取之前的规则。
+    stamp_duty_rate: float = 0.0005  # 2023-08-28 起减半（财政部 税务总局公告 2023 年第 39 号）
+    stamp_duty_rate_before: float = 0.001
+    stamp_duty_change_date: date = date(2023, 8, 28)
+    transfer_fee_rate: float = 0.00001  # 2022-04-29 起下调 50%（中国结算通知）
+    transfer_fee_rate_before: float = 0.00002
+    transfer_fee_change_date: date = date(2022, 4, 29)
     slippage: float = 0.001  # 按开盘价的比例，方向对交易者不利
     lot_size: int = 100  # 整手：买入股数向下取整到它的整数倍
     # 涨跌幅限制，相对前收盘价
@@ -58,15 +64,16 @@ class StockRules:
             return self.config.chinext_limit
         return self.config.st_limit if is_st else self.config.main_board_limit
 
-    def fee(self, side: Side, amount: float) -> float:
-        """交易费用：佣金（有最低额）+ 过户费，卖出另收印花税。"""
+    def fee(self, side: Side, amount: float, day: date) -> float:
+        """交易费用：佣金（有最低额）+ 过户费，卖出另收印花税；印花税、过户费按成交日 day 取费率。"""
         if amount <= 0:
             return 0.0
         c = self.config
-        fee = max(amount * c.commission_rate, c.min_commission) + \
-            amount * c.transfer_fee_rate
+        transfer_rate = c.transfer_fee_rate if day >= c.transfer_fee_change_date else c.transfer_fee_rate_before
+        fee = max(amount * c.commission_rate, c.min_commission) + amount * transfer_rate
         if side is Side.SELL:
-            fee += amount * c.stamp_duty_rate
+            stamp_rate = c.stamp_duty_rate if day >= c.stamp_duty_change_date else c.stamp_duty_rate_before
+            fee += amount * stamp_rate
         return fee
 
     def quote(self, symbol: str, day: date) -> Bar | None:
@@ -129,15 +136,14 @@ class StockRules:
         price = bar.open * (1 + sign * self.config.slippage)
         if order.side is Side.BUY:
             if order.quantity is None:
-                quantity = self._max_affordable(
-                    price, portfolio.cash)
+                quantity = self._max_affordable(price, portfolio.cash, day)
                 if quantity <= 0:
                     return reject(RejectReason.INSUFFICIENT_CASH)
             else:
                 quantity = self._round_lot(order.quantity)
                 if quantity <= 0:
                     return reject(RejectReason.ODD_LOT)
-            if quantity * price + self.fee(Side.BUY, quantity * price) > portfolio.cash:
+            if quantity * price + self.fee(Side.BUY, quantity * price, day) > portfolio.cash:
                 return reject(RejectReason.INSUFFICIENT_CASH)
         else:
             if portfolio.positions.get(order.symbol, 0) <= 0:
@@ -148,16 +154,16 @@ class StockRules:
             # 指定数量超过可卖数量时只卖出可卖部分
             quantity = sellable if order.quantity is None else min(
                 order.quantity, sellable)
-        return Fill(day, order.symbol, order.side, quantity, price, self.fee(order.side, quantity * price))
+        return Fill(day, order.symbol, order.side, quantity, price, self.fee(order.side, quantity * price, day))
 
     def _round_lot(self, quantity: int) -> int:
         return quantity // self.config.lot_size * self.config.lot_size
 
-    def _max_affordable(self, price: float, cash: float) -> int:
+    def _max_affordable(self, price: float, cash: float, day: date) -> int:
         """满仓买入：现金（含费用）能买到的最大整手股数，从不计费用时的上限逐手递减。"""
         lot = self.config.lot_size
         quantity = self._round_lot(math.floor(cash / price))
-        while quantity > 0 and quantity * price + self.fee(Side.BUY, quantity * price) > cash:
+        while quantity > 0 and quantity * price + self.fee(Side.BUY, quantity * price, day) > cash:
             quantity -= lot
         return quantity
 

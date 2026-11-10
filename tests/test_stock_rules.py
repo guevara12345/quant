@@ -138,6 +138,27 @@ def test_default_fees_with_minimum_commission_and_stamp_duty_on_sells_only(quant
         1_000_000 - buy_fee - sell_fee)
 
 
+@pytest.mark.parametrize("days, buy_fee, sell_fee", [
+    # 2022-04-29 之前：过户费 0.002%、印花税 0.1%（docs/scenarios/a-share-stock.md S04）
+    ((date(2020, 6, 1), date(2020, 6, 2), date(2020, 6, 3)), 27.0, 127.0),
+    # 过户费已减半、印花税未减半
+    ((date(2023, 8, 24), date(2023, 8, 25), date(2023, 8, 28)), 26.0, 76.0),
+    # 印花税减半前最后一个卖出日仍按 0.1%
+    ((date(2023, 8, 23), date(2023, 8, 24), date(2023, 8, 25)), 26.0, 126.0),
+])
+def test_stamp_duty_and_transfer_fee_follow_their_effective_dates(days, buy_fee, sell_fee):
+    # 成交额 100,000，佣金 25；费率按成交日取
+    d1, d2, d3 = days
+    feed = make_feed(SYMBOL, {d1: (10, 10), d2: (10, 10), d3: (10, 10)})
+    strategy = Script(
+        {1: [Order(SYMBOL, Side.BUY, 10_000)], 2: [Order(SYMBOL, Side.SELL)]})
+    config = BacktestConfig(initial_cash=1_000_000,
+                            cash_rate=0.0, stock=StockConfig(slippage=0.0))
+    result = run_backtest(feed, strategy, start=d1, end=d3, config=config)
+
+    assert result.fills["fee"].tolist() == pytest.approx([buy_fee, sell_fee])
+
+
 def test_slippage_is_adverse_for_both_buys_and_sells():
     feed = make_feed(SYMBOL, {D1: (10, 10), D2: (10, 10), D3: (10, 10)})
     strategy = Script({1: [Order(SYMBOL, Side.BUY, 1000)],
