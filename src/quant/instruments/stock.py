@@ -2,7 +2,8 @@
 
 检查顺序：停牌 → 涨跌停（开盘价等于涨停价时跳过买单、等于跌停价时跳过卖单）→
 买入按整手取整并检查资金 / 卖出检查持仓与 T+1。没有成交的订单返回 Rejection 并注明原因。
-费用为佣金（有最低额）+ 过户费，卖出另收印花税；印花税、过户费按成交日取对应时期的费率。除权日持股数按复权因子比例放大、涨跌停以除权参考价为基准（apply_ex_rights）。
+成交价 = 开盘价加不利滑点，向不利方向取整到最小价位 0.01 元，并截断在涨跌停价以内。
+费用为佣金（有最低额）+ 过户费，卖出另收印花税，各项分别四舍五入到分；印花税、过户费按成交日取对应时期的费率。除权日持股数按复权因子比例放大、涨跌停以除权参考价为基准（apply_ex_rights）。
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
 
 from quant.data.feed import Bar, DataFeed
 from quant.portfolio import Alert, Fill, Portfolio, RejectReason, Rejection
@@ -65,16 +66,16 @@ class StockRules:
         return self.config.st_limit if is_st else self.config.main_board_limit
 
     def fee(self, side: Side, amount: float, day: date) -> float:
-        """交易费用：佣金（有最低额）+ 过户费，卖出另收印花税；印花税、过户费按成交日 day 取费率。"""
+        """交易费用：佣金（有最低额）+ 过户费，卖出另收印花税；各项分别四舍五入到分，印花税、过户费按成交日 day 取费率。"""
         if amount <= 0:
             return 0.0
         c = self.config
         transfer_rate = c.transfer_fee_rate if day >= c.transfer_fee_change_date else c.transfer_fee_rate_before
-        fee = max(amount * c.commission_rate, c.min_commission) + amount * transfer_rate
+        items = [max(amount * c.commission_rate, c.min_commission), amount * transfer_rate]
         if side is Side.SELL:
             stamp_rate = c.stamp_duty_rate if day >= c.stamp_duty_change_date else c.stamp_duty_rate_before
-            fee += amount * stamp_rate
-        return fee
+            items.append(amount * stamp_rate)
+        return _to_cent(sum(Decimal(str(_to_cent(x))) for x in items))
 
     def quote(self, symbol: str, day: date) -> Bar | None:
         return self.feed.bar(symbol, day)
@@ -126,14 +127,15 @@ class StockRules:
 
         if bar.suspended:
             return reject(RejectReason.SUSPENDED)
+        limit_up = limit_down = None
         if prev_close is not None:
             ratio = self.limit_ratio(order.symbol, day, bar.is_st)
-            if order.side is Side.BUY and bar.open >= limit_price(prev_close, 1 + ratio):
+            limit_up, limit_down = limit_price(prev_close, 1 + ratio), limit_price(prev_close, 1 - ratio)
+            if order.side is Side.BUY and bar.open >= limit_up:
                 return reject(RejectReason.LIMIT_UP)
-            if order.side is Side.SELL and bar.open <= limit_price(prev_close, 1 - ratio):
+            if order.side is Side.SELL and bar.open <= limit_down:
                 return reject(RejectReason.LIMIT_DOWN)
-        sign = 1 if order.side is Side.BUY else -1
-        price = bar.open * (1 + sign * self.config.slippage)
+        price = self._fill_price(order.side, bar.open, limit_up, limit_down)
         if order.side is Side.BUY:
             if order.quantity is None:
                 quantity = self._max_affordable(price, portfolio.cash, day)
@@ -155,6 +157,20 @@ class StockRules:
             quantity = sellable if order.quantity is None else min(
                 order.quantity, sellable)
         return Fill(day, order.symbol, order.side, quantity, price, self.fee(order.side, quantity * price, day))
+
+    def _fill_price(
+        self, side: Side, open_price: float, limit_up: float | None, limit_down: float | None,
+    ) -> float:
+        """开盘价加不利滑点，向不利方向取整到 0.01 元（买入进位、卖出舍去），再截断在涨跌停价以内。"""
+        sign = 1 if side is Side.BUY else -1
+        raw = Decimal(str(open_price)) * (1 + sign * Decimal(str(self.config.slippage)))
+        rounding = ROUND_CEILING if side is Side.BUY else ROUND_FLOOR
+        price = float(raw.quantize(Decimal("0.01"), rounding=rounding))
+        if side is Side.BUY and limit_up is not None:
+            price = min(price, limit_up)
+        if side is Side.SELL and limit_down is not None:
+            price = max(price, limit_down)
+        return price
 
     def _round_lot(self, quantity: int) -> int:
         return quantity // self.config.lot_size * self.config.lot_size

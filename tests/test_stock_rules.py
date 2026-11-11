@@ -172,6 +172,45 @@ def test_slippage_is_adverse_for_both_buys_and_sells():
     assert result.daily["cash"].iloc[-1] == pytest.approx(100_000 - 20)
 
 
+def test_each_fee_item_rounds_to_the_cent():
+    # docs/scenarios/a-share-stock.md S02：成交额 168,888.00，佣金 42.222 → 42.22、过户费 1.68888 → 1.69、
+    # 印花税 84.444 → 84.44；买入 43.91，卖出 128.35
+    feed = make_feed(SYMBOL, {D1: (1688.88, 1688.88), D2: (1688.88, 1688.88), D3: (1688.88, 1688.88)})
+    strategy = Script({1: [Order(SYMBOL, Side.BUY, 100)], 2: [Order(SYMBOL, Side.SELL)]})
+    config = BacktestConfig(initial_cash=200_000, cash_rate=0.0, stock=StockConfig(slippage=0.0))
+    result = run_backtest(feed, strategy, start=D1, end=D3, config=config)
+
+    assert result.fills["fee"].tolist() == [43.91, 128.35]
+    assert result.daily["cash"].iloc[-1] == pytest.approx(200_000 - 43.91 - 128.35, abs=1e-9)
+
+
+@pytest.mark.parametrize("open_price, price", [
+    (10.0, 10.01),   # 10.005 不在 0.01 元价位上，买入向不利方向取到 10.01
+    (11.05, 11.06),  # S08：11.06105 越过涨停价 11.06，截断到涨停价
+])
+def test_buy_fill_price_is_on_tick_and_within_limit_up(open_price, price):
+    feed = make_feed(SYMBOL, {D1: (10.05, 10.05), D2: (open_price, open_price)})
+    config = BacktestConfig(initial_cash=100_000, cash_rate=0.0,
+                            stock=stock_costs(slippage=0.0005 if open_price == 10.0 else 0.001))
+    result = run_backtest(feed, Script({1: [Order(SYMBOL, Side.BUY, 100)]}), start=D1, end=D2, config=config)
+
+    assert result.fills["price"].tolist() == [price]
+
+
+@pytest.mark.parametrize("open_price, slippage, price", [
+    (10.0, 0.0005, 9.99),  # 9.995 向不利方向取到 9.99
+    (9.06, 0.002, 9.05),   # 9.04188 越过跌停价 9.05，截断到跌停价
+])
+def test_sell_fill_price_is_on_tick_and_within_limit_down(open_price, slippage, price):
+    # 第 2 日以 10.05 买入，收盘 10.05；第 3 日开盘卖出，跌停价 9.05
+    feed = make_feed(SYMBOL, {D1: (10.05, 10.05), D2: (10.05, 10.05), D3: (open_price, open_price)})
+    strategy = Script({1: [Order(SYMBOL, Side.BUY, 100)], 2: [Order(SYMBOL, Side.SELL)]})
+    config = BacktestConfig(initial_cash=100_000, cash_rate=0.0, stock=stock_costs(slippage=slippage))
+    result = run_backtest(feed, strategy, start=D1, end=D3, config=config)
+
+    assert result.fills["price"].tolist()[-1] == price
+
+
 def test_buy_beyond_cash_is_rejected_and_cash_never_goes_negative():
     feed = make_feed(SYMBOL, {D1: (10, 10), D2: (
         10, 10), D3: (10, 10), D4: (10, 10)})

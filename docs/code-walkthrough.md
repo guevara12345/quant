@@ -792,7 +792,7 @@ stateDiagram-v2
 
 ### 8.1 `StockRules.match_at_open`
 
-[`stock.py:119`](../src/quant/instruments/stock.py#L119)，由协议方法 [`StockRules.match`](../src/quant/instruments/stock.py#L102) 传入自己记的涨跌停基准后调用。每个订单要么变成 `Fill`，要么变成带原因的 `Rejection`，不会静默消失。
+[`stock.py:120`](../src/quant/instruments/stock.py#L120)，由协议方法 [`StockRules.match`](../src/quant/instruments/stock.py#L103) 传入自己记的涨跌停基准后调用。每个订单要么变成 `Fill`，要么变成带原因的 `Rejection`，不会静默消失。
 
 ```mermaid
 flowchart TD
@@ -805,7 +805,7 @@ flowchart TD
     LU -- 是 --> RLU([Rejection 涨停])
     LU -- 否 --> LD{"卖单且 open ≤ 跌停价?"}
     LD -- 是 --> RLD([Rejection 跌停])
-    LD -- 否 --> Px["price = open × (1 ± slippage)<br/>买入上浮、卖出下浮"]
+    LD -- 否 --> Px["price = open × (1 ± slippage)<br/>买入上浮进位到分、卖出下浮舍去到分<br/>截断在涨跌停价以内"]
     Px --> Side{order.side}
     Side -- BUY --> BQ{"quantity is None?"}
     BQ -- 是 --> MA["quantity = _max_affordable(price, cash)<br/>（已是整手）"]
@@ -828,7 +828,7 @@ flowchart TD
 
 `prev_close` 为 `None` 只发生在回测区间第一个有 bar 的交易日之前没有收盘价时，此时不检查涨跌停。除权日传入的是除权参考价（见下文「除权」）。
 
-**涨跌幅**（[`limit_ratio`](../src/quant/instruments/stock.py#L58)）按代码前缀判断板块：
+**涨跌幅**（[`limit_ratio`](../src/quant/instruments/stock.py#L59)）按代码前缀判断板块：
 
 | 板块 | 代码前缀 | 涨跌幅 | ST 股 |
 | --- | --- | --- | --- |
@@ -836,17 +836,17 @@ flowchart TD
 | 创业板，成交日 ≥ `chinext_reform_date`（2020-08-24） | `300` / `301` | 20% | 20%（与板块相同） |
 | 改革前的创业板、主板 | 其余 | 10% | 5% |
 
-涨跌停价（[`limit_price`](../src/quant/instruments/stock.py#L171)）用 `Decimal` 计算并四舍五入到分，避免 `9.5 × 1.1 = 10.450000000000001` 这类浮点误差让「开盘等于涨停价」判断失效。判断用 `≥` / `≤`，与「等于」等价（开盘价不会越过涨跌停价）。
+涨跌停价（[`limit_price`](../src/quant/instruments/stock.py#L187)）用 `Decimal` 计算并四舍五入到分，避免 `9.5 × 1.1 = 10.450000000000001` 这类浮点误差让「开盘等于涨停价」判断失效。判断用 `≥` / `≤`，与「等于」等价（开盘价不会越过涨跌停价）。
 
-**费用**（[`fee`](../src/quant/instruments/stock.py#L67)）：`max(成交额 × 佣金率, 最低佣金) + 成交额 × 过户费率`，卖出再加 `成交额 × 印花税率`。成交额按含滑点的成交价计算。印花税和过户费按成交日取费率：成交日早于 `stamp_duty_change_date`（2023-08-28）或 `transfer_fee_change_date`（2022-04-29）时，改用对应的 `*_before` 费率。写法与创业板涨跌幅的 `chinext_reform_date` 一致。
+**费用**（[`fee`](../src/quant/instruments/stock.py#L68)）：`max(成交额 × 佣金率, 最低佣金) + 成交额 × 过户费率`，卖出再加 `成交额 × 印花税率`；每一项先四舍五入到分再相加（情景 S02）。成交额按含滑点的成交价计算。印花税和过户费按成交日取费率：成交日早于 `stamp_duty_change_date`（2023-08-28）或 `transfer_fee_change_date`（2022-04-29）时，改用对应的 `*_before` 费率。写法与创业板涨跌幅的 `chinext_reform_date` 一致。
 
-**满仓买入的股数**（[`_max_affordable`](../src/quant/instruments/stock.py#L162)）：先取不计费用时能买的整手上限 `_round_lot(floor(cash / price))`，再逐手递减，直到 `成交额 + fee ≤ cash`。费用只在 `fee()` 一处计算，新增费用项不用改这里。
+**满仓买入的股数**（[`_max_affordable`](../src/quant/instruments/stock.py#L178)）：先取不计费用时能买的整手上限 `_round_lot(floor(cash / price))`，再逐手递减，直到 `成交额 + fee ≤ cash`。费用只在 `fee()` 一处计算，新增费用项不用改这里。
 
 例：现金 100,000、价格 10、只收万 2.5 佣金 → 上限 10,000 股需要 100,025，超出现金；退到 9,900 股，99,000 + 24.75 ≤ 100,000。见测试 [`test_full_position_buy_takes_as_many_whole_lots_as_cash_and_commission_allow`](../tests/test_engine.py#L96)。
 
 **T+1 的可卖数量**（[`Portfolio.sellable`](../src/quant/portfolio.py#L71)）：`Portfolio` 记住最近一个有买入成交的日期及当日各标的买入数量，可卖数量 = 持股 − 当日买入（查询日期不是那一天时，当日买入视为 0）。这样引擎不必每天通知账户「新的一天」。
 
-**除权**（[`before_open`](../src/quant/instruments/stock.py#L82) → [`apply_ex_rights`](../src/quant/instruments/stock.py#L90)）：后复权因子只在除权日跳变，`StockRules` 在开盘前发现因子变化就把 `ratio = 当日因子 / 前一日因子` 交给品种规则，它就是一股变成几股的比例（送转是真实的股数变化，现金分红则近似为按除权价再投资）。
+**除权**（[`before_open`](../src/quant/instruments/stock.py#L83) → [`apply_ex_rights`](../src/quant/instruments/stock.py#L91)）：后复权因子只在除权日跳变，`StockRules` 在开盘前发现因子变化就把 `ratio = 当日因子 / 前一日因子` 交给品种规则，它就是一股变成几股的比例（送转是真实的股数变化，现金分红则近似为按除权价再投资）。
 
 - 持股数 = `round(持股 × ratio)`，取最近的整股、不要求整手，由 [`Portfolio.adjust_position`](../src/quant/portfolio.py#L125) 写回，不产生成交、不动现金。例：每 10 股送 1 股，因子 1.0 → 1.1，1000 股 → 1100 股，不复权价 11 → 10，市值不变。
 - 除权参考价 = `前收盘价 / ratio`，四舍五入到分，写回 `StockRules._ref_price`，当日涨跌停以它为基准。例：前收盘 10、因子 1 → 2，参考价 5，主板涨停价 5.5（若仍按 10 算是 11，判断会偏松）。
@@ -1150,7 +1150,7 @@ flowchart LR
 | `test_golden_cross_buys_and_death_cross_sells_on_next_day_open` | 双均线交叉与成交时点 |
 | `test_ex_rights_gap_does_not_trigger_death_cross_because_signal_uses_adjusted_price` | 除权缺口不产生假死叉（信号用后复权价） |
 | `test_metrics_and_buy_and_hold_benchmark` | 各项指标手算校验 |
-| `test_stock_rules.py` 各测试 | T+1、整手、开盘涨跌停跳过、各板块 / ST / 创业板改革日的涨跌幅、停牌、默认费率、印花税与过户费的生效日期、滑点方向、资金不足拒单、每笔未成交都有原因；除权日按不复权价撮合与取整、涨跌停以除权参考价为基准 |
+| `test_stock_rules.py` 各测试 | T+1、整手、开盘涨跌停跳过、各板块 / ST / 创业板改革日的涨跌幅、停牌、默认费率、印花税与过户费的生效日期、滑点方向、费用逐项取整到分、成交价取整到最小价位并截断在涨跌停价以内、资金不足拒单、每笔未成交都有原因；除权日按不复权价撮合与取整、涨跌停以除权参考价为基准 |
 | `test_moutai_buy_and_hold_tracks_backward_adjusted_return_across_ex_rights_days`（联网） | 茅台 2016–2024 持有期市值涨幅与后复权价涨幅一致 |
 | `test_report_lists_skipped_orders_with_reasons` | `rejections.csv` 内容与终端汇总 |
 | `test_future_rules.py` 各测试 | 当日收盘成交与结算价盯市、名义本金按乘数 200、保证金 14%、平今万 2.3 / 平昨万 0.23、到期强平与警告、第三个周五遇节假日顺延、资金不足拒绝开仓、保证金不计息 |
@@ -1205,7 +1205,7 @@ sequenceDiagram
 6. **卖出数量超过可卖数量时部分成交**：只卖出可卖部分，剩余部分不记 `Rejection`。买入不做部分成交，资金不够时整单拒绝。
 7. **涨跌停价以上一交易日不复权收盘价为基准，除权日改用除权参考价**：参考价由复权因子比例推算，不是交易所公布值，分红金额很小时可能差一分钱。新股上市初期不设涨跌幅、北交所 30% 等规则也没有建模。
 8. **零股只在全部卖出时才能卖干净**：除权取整后持股常带零股（如 1012 股）。A 股要求零股一次性卖出，但按指定数量卖出时引擎不检查这条，可能留下零股；双均线总是全部卖出，不受影响。
-9. **滑点后的买价可能略高于涨停价**：只有开盘价低于涨停价才会成交，但 `open × 1.001` 可能越过涨停价，没有截断，影响可忽略。
+9. **成交价向不利方向取整到分**：[`_fill_price`](../src/quant/instruments/stock.py#L161) 把 `open × (1 ± 滑点)` 买入进位、卖出舍去到 0.01 元，再截断在涨跌停价以内（情景 S08）。所以只要滑点不为 0，成交价至少差 1 分，低价股上的实际滑点会高于 `slippage`（开盘 3.00 时约 0.33%）。
 10. **`Context.history(symbol)` 每次调用复制一次**：双均线每天调用一次，复杂度 O(n²)，10 年约 2,500 个交易日，可以接受。
 11. **计息位置**：在交易日开头为上一段间隔计息，而 spec 写的是「当日末计息」。两者在净值上等价，只是周末利息记到下一交易日。
 12. **`buy_and_hold_nav` 被调用两次**：`compute_metrics` 内部一次（算指标），`cli` 里一次（画图和写 `daily.csv`），结果相同。
