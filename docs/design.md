@@ -38,6 +38,7 @@ ticket 01 已经搭好骨架：数据加载与缓存、统一账户、按交易�
 | 模块 | 现状 | 目标 |
 | --- | --- | --- |
 | `data/feed.py`、`data/cache.py`、`data/baostock_feed.py` | 已实现；`Bar.settle`；缓存按月分段补拉（断点续拉） | — |
+| `dataqa.py` | 股票日线数据质量检查（学习路线阶段 1）：行情异常与公司行动四方核对，异常须在 `docs/data-quality/notes.csv` 中解释 | — |
 | `data/cffex_feed.py`、`data/akshare_feed.py` | IC 分合约日线与结算价（中金所月度数据包）、中证 500 与 510500（AKShare） | — |
 | `portfolio.py` | 现金 + 持仓 + 当日买入（可卖数量 / 平昨数量）；期货盯市基准价与保证金占用；`Rejection`、`Alert` | — |
 | `instruments/stock.py`、`instruments/future.py` | A 股撮合规则；期货收盘成交、盯市、平今平昨、保证金、到期强平 | — |

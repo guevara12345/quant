@@ -57,13 +57,8 @@ class StockRules:
         self._last_factor: dict[str, float] = {}
 
     def limit_ratio(self, symbol: str, day: date, is_st: bool) -> float:
-        """当日涨跌幅限制：按板块、是否 ST、创业板改革日期决定。"""
-        code = symbol.rsplit(".", 1)[-1]
-        if code.startswith(STAR_PREFIXES):
-            return self.config.star_limit
-        if code.startswith(CHINEXT_PREFIXES) and day >= self.config.chinext_reform_date:
-            return self.config.chinext_limit
-        return self.config.st_limit if is_st else self.config.main_board_limit
+        """当日涨跌幅限制，见模块函数 limit_ratio。"""
+        return limit_ratio(self.config, symbol, day, is_st)
 
     def fee(self, side: Side, amount: float, day: date) -> float:
         """交易费用：佣金（有最低额）+ 过户费，卖出另收印花税；各项分别四舍五入到分，印花税、过户费按成交日 day 取费率。"""
@@ -98,7 +93,7 @@ class StockRules:
         held = portfolio.positions.get(symbol, 0)
         if held:
             portfolio.adjust_position(symbol, round(held * ratio))
-        return _to_cent(prev_close / ratio)
+        return ex_rights_ref_price(prev_close, ratio)
 
     def match(self, order: Order, day: date, bar: Bar, portfolio: Portfolio) -> Fill | Rejection:
         return self.match_at_open(order, day, bar, self._ref_price.get(order.symbol), portfolio)
@@ -182,6 +177,21 @@ class StockRules:
         while quantity > 0 and quantity * price + self.fee(Side.BUY, quantity * price, day) > cash:
             quantity -= lot
         return quantity
+
+
+def limit_ratio(config: StockConfig, symbol: str, day: date, is_st: bool) -> float:
+    """当日涨跌幅限制：按板块、是否 ST、创业板改革日期决定。撮合和数据质量检查共用。"""
+    code = symbol.rsplit(".", 1)[-1]
+    if code.startswith(STAR_PREFIXES):
+        return config.star_limit
+    if code.startswith(CHINEXT_PREFIXES) and day >= config.chinext_reform_date:
+        return config.chinext_limit
+    return config.st_limit if is_st else config.main_board_limit
+
+
+def ex_rights_ref_price(prev_close: float, ratio: float) -> float:
+    """原型的除权参考价：前收盘价 / 复权因子比例，四舍五入到分。数据质量检查用它与交易所的前收盘价核对。"""
+    return _to_cent(prev_close / ratio)
 
 
 def limit_price(prev_close: float, multiplier: float) -> float:

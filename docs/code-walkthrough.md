@@ -69,7 +69,8 @@ flowchart LR
 
 ```
 src/quant/
-├── cli.py                  命令行入口，串联全流程；load_roll_ic_feed 组装 IC + 中证 500 + 510500 + 日历；run_roll_ic 同时跑对冲与纯滚 IC
+├── cli.py                  命令行入口，串联全流程；load_roll_ic_feed 组装 IC + 中证 500 + 510500 + 日历；run_roll_ic 同时跑对冲与纯滚 IC；dataqa_main 输出数据质量报告
+├── dataqa.py               股票日线数据质量检查（阶段 1）：行情异常、公司行动四方核对、异常说明文件
 ├── engine.py               回测主循环、按品种分派、BacktestConfig、BacktestResult
 ├── strategy.py             Strategy（universe + on_bar）/ Context / Order / Side
 ├── portfolio.py            Portfolio 统一账户、Fill、Rejection / RejectReason、Alert
@@ -80,7 +81,7 @@ src/quant/
 ├── data/
 │   ├── feed.py             Bar、DataFeed 协议、InMemoryDataFeed
 │   ├── cache.py            ParquetCache（覆盖区间 + 增量补拉 + 按月断点续拉）
-│   ├── baostock_feed.py    baostock 适配器（股票、交易日历）
+│   ├── baostock_feed.py    baostock 适配器（股票、交易日历；数据质量检查用的前收盘价、成交量、分红送转）
 │   ├── cffex_feed.py       中金所适配器（股指期货分合约日线与结算价）
 │   └── akshare_feed.py     AKShare 适配器（指数日线、ETF 日线与分红推算的后复权因子）
 ├── instruments/
@@ -104,6 +105,7 @@ tests/
 ├── test_metrics.py         指标手算校验（含期货按名义本金）
 ├── test_report.py          rejections.csv 与未成交汇总
 ├── test_cache.py           按月补拉的断点续拉
+├── test_dataqa.py          数据质量检查：每项检查植入一处异常、送转股的除权参考价、异常说明
 ├── test_cli.py             --set 覆盖嵌套配置
 ├── test_baostock_smoke.py  联网冒烟（默认跳过）
 └── test_ic_data_smoke.py   中金所 IC、AKShare 指数与 510500 联网冒烟（默认跳过）
@@ -468,14 +470,14 @@ flowchart LR
     C --> D["④ 输出<br/>指标 + 报告文件"]
 ```
 
-[`cli.main`](../src/quant/cli.py#L35) 完成阶段 ①，再按策略交给 [`run_ma_cross`](../src/quant/cli.py#L72) 或 [`run_roll_ic`](../src/quant/cli.py#L93) 完成 ②–④：
+[`cli.main`](../src/quant/cli.py#L36) 完成阶段 ①，再按策略交给 [`run_ma_cross`](../src/quant/cli.py#L73) 或 [`run_roll_ic`](../src/quant/cli.py#L94) 完成 ②–④：
 
 | 阶段 | `cli.main` 中的代码 | 输入 | 输出 | 详见 |
 | --- | --- | --- | --- | --- |
-| ① 准备 | [L58-61](../src/quant/cli.py#L58) `parse_args`、`apply_overrides` | 命令行参数 | `args`、`BacktestConfig` | [§11](#11-命令行与配置覆盖) |
-| ② 加载数据 | [L74](../src/quant/cli.py#L74) `load_baostock_feed`；[L99](../src/quant/cli.py#L99) `load_roll_ic_feed` | 区间、缓存目录 | `InMemoryDataFeed` | [§6](#6-数据层详解) |
-| ③ 回测 | [L76](../src/quant/cli.py#L76) `run_backtest(MaCross(...))`；[L101](../src/quant/cli.py#L101) 纯滚 IC、[L117](../src/quant/cli.py#L117) 对冲版各跑一次 `run_backtest` | feed、策略、配置 | `BacktestResult` | [§7](#7-回测引擎详解)–[§9](#9-策略接口与策略实现) |
-| ④ 输出 | [L105-146](../src/quant/cli.py#L105) `basis_table`、`delta_table`、`return_breakdown`、`split_metrics`（roll_ic）、`compute_metrics`、`buy_and_hold_nav`、`write_report`、`print` | result、feed | 终端文本 + 6 个文件 | [§10](#10-绩效指标与报告) |
+| ① 准备 | [L59-62](../src/quant/cli.py#L59) `parse_args`、`apply_overrides` | 命令行参数 | `args`、`BacktestConfig` | [§11](#11-命令行与配置覆盖) |
+| ② 加载数据 | [L75](../src/quant/cli.py#L75) `load_baostock_feed`；[L100](../src/quant/cli.py#L100) `load_roll_ic_feed` | 区间、缓存目录 | `InMemoryDataFeed` | [§6](#6-数据层详解) |
+| ③ 回测 | [L77](../src/quant/cli.py#L77) `run_backtest(MaCross(...))`；[L102](../src/quant/cli.py#L102) 纯滚 IC、[L118](../src/quant/cli.py#L118) 对冲版各跑一次 `run_backtest` | feed、策略、配置 | `BacktestResult` | [§7](#7-回测引擎详解)–[§9](#9-策略接口与策略实现) |
+| ④ 输出 | [L106-147](../src/quant/cli.py#L106) `basis_table`、`delta_table`、`return_breakdown`、`split_metrics`（roll_ic）、`compute_metrics`、`buy_and_hold_nav`、`write_report`、`print` | result、feed | 终端文本 + 6 个文件 | [§10](#10-绩效指标与报告) |
 
 阶段之间只通过这几个值传递：`config`、`feed`、`result`。理解了这三个对象，就理解了模块之间怎么衔接。
 
@@ -519,7 +521,7 @@ sequenceDiagram
     Note over L: 返回 InMemoryDataFeed（交易日历 + bars）
 ```
 
-`roll_ic` 走 [`load_roll_ic_feed`](../src/quant/cli.py#L149)：baostock 交易日历 → 中金所 IC 各合约（`get_by_month` 按月补拉）→ AKShare 中证 500 →（对冲时）510500，合成一个 `InMemoryDataFeed`。对冲时交易日历与 510500 从回测起点往前多取 3 × 波动率窗口 + 10 个自然日，期权模型价在回测首日就有完整的波动率窗口，并把已公布日历之后的工作日追加进日历（见 [§14](#14-阅读时容易忽略的细节)）。
+`roll_ic` 走 [`load_roll_ic_feed`](../src/quant/cli.py#L150)：baostock 交易日历 → 中金所 IC 各合约（`get_by_month` 按月补拉）→ AKShare 中证 500 →（对冲时）510500，合成一个 `InMemoryDataFeed`。对冲时交易日历与 510500 从回测起点往前多取 3 × 波动率窗口 + 10 个自然日，期权模型价在回测首日就有完整的波动率窗口，并把已公布日历之后的工作日追加进日历（见 [§14](#14-阅读时容易忽略的细节)）。
 
 关键点：引擎拿到的 `InMemoryDataFeed` 里已经没有任何 baostock、中金所、AKShare 或缓存的痕迹，后面的阶段完全不知道数据从哪来。
 
@@ -624,7 +626,7 @@ flowchart LR
 
 ### 6.2 `load_baostock_feed`：外部数据如何变成 `Bar`
 
-[`baostock_feed.py:33`](../src/quant/data/baostock_feed.py#L33)（只要交易日历时用 [`load_trade_calendar`](../src/quant/data/baostock_feed.py#L25)）
+[`baostock_feed.py:36`](../src/quant/data/baostock_feed.py#L36)（只要交易日历时用 [`load_trade_calendar`](../src/quant/data/baostock_feed.py#L28)）
 
 ```mermaid
 flowchart TD
@@ -643,7 +645,7 @@ flowchart TD
 
 三个值得注意的实现细节：
 
-1. **懒登录**（[`_BaostockSource._login`](../src/quant/data/baostock_feed.py#L117)）：`_session()` 只是创建对象，真正 `bs.login()` 发生在第一次 `_query` 时。缓存全部命中时一次都不登录，所以断网能跑。
+1. **懒登录**（[`_BaostockSource._login`](../src/quant/data/baostock_feed.py#L169)）：`_session()` 只是创建对象，真正 `bs.login()` 发生在第一次 `_query` 时。缓存全部命中时一次都不登录，所以断网能跑。
 2. **复权因子从 1990 年取**：baostock 的复权因子只在除权日有记录。如果从回测起点开始取，起点之前最近一次除权的因子就丢了，区间开头的因子会被错误地填成 1.0。
 3. **字段映射集中在 `_BaostockSource`**：`tradestatus == "0"` → 停牌、`isST == "1"` → ST、`dividOperateDate` / `backAdjustFactor` 等 baostock 专有命名都只出现在这里，数据源改字段时只改这一个类。
 
@@ -705,8 +707,21 @@ data_cache/baostock/
 ├── trade_dates.parquet                    date, is_trading_day
 ├── k_sh.600519_unadjusted.parquet         date, open, high, low, close, suspended, is_st
 ├── k_sh.600519_backward_adjusted.parquet  同上（后复权）
-└── adjust_factor_sh.600519.parquet        date, back_adjust_factor
+├── adjust_factor_sh.600519.parquet        date, back_adjust_factor
+├── k_sh.600519_quality.parquet            date, open, high, low, close, preclose, volume, suspended, is_st（dataqa 用）
+└── dividend_sh.600519.parquet             date（除权除息日）, cash（每股税前红利）, shares（每股送转股）（dataqa 用）
 ```
+
+### 6.5 数据质量检查：`dataqa`
+
+学习路线阶段 1 的验收任务三。[`load_quality_inputs`](../src/quant/data/baostock_feed.py#L54) 取不复权日线（多了交易所公布的前收盘价 `preclose` 和成交量，单独缓存，不动回测用的缓存）、交易日历、复权因子和分红送转，组装成与数据源无关的 [`QualityInputs`](../src/quant/dataqa.py)；[`check_quality`](../src/quant/dataqa.py) 只看这张规范化表，检查项见 `dataqa.CHECKS`：
+
+- **行情本身**：首条记录之后缺失的交易日、非交易日有数据、价格缺失或非正、开高低收不自洽、最高 / 最低价超出涨跌停价、未停牌但零成交量却有价格变动、停牌日有成交。涨跌停以交易所的 `preclose` 为基准，除权日不用排除；涨跌幅用与撮合同一个 `limit_ratio`。
+- **公司行动四方核对**：「前收盘价 ≠ 上一条收盘价」「有分红送转记录」「复权因子跳变」三者的日期必须一致；有分红送转时，按交易所公式 `(前收盘 − 每股红利) / (1 + 每股送转)` 取整到分，须等于 `preclose`；复权因子跳变时，原型的除权参考价（[`ex_rights_ref_price`](../src/quant/instruments/stock.py#L192)，即撮合用的那个函数）也须等于 `preclose`。
+
+每条异常要在 [`docs/data-quality/notes.csv`](data-quality/notes.csv)（`symbol,date,check,explanation`）里写明原因和依据；有未解释的条目时 `dataqa` 以退出码 1 结束。输出目录 `output/dataqa_<代码>_<起>_<止>/` 含 `summary.md`、`anomalies.csv`（带解释列）和 `actions.csv`（逐个除权日的核对依据）。
+
+sh.600519 2016-01-04 至 2026-10-15 的结果：2617 条记录，无停牌、缺失或越界；15 个除权日中，原型参考价全部与交易所前收盘价一致到分。5 条异常都已解释：baostock 分红接口漏了 2022-12-27、2023-12-20 两次特别分红（复权因子里有），以及 2025-06-26 的差异化分红（回购股份不参与分配，除权参考价按摊薄后的每股 27.600 元算，不是实派的 27.673 元）。
 
 ## 7. 回测引擎详解
 
@@ -792,7 +807,7 @@ stateDiagram-v2
 
 ### 8.1 `StockRules.match_at_open`
 
-[`stock.py:120`](../src/quant/instruments/stock.py#L120)，由协议方法 [`StockRules.match`](../src/quant/instruments/stock.py#L103) 传入自己记的涨跌停基准后调用。每个订单要么变成 `Fill`，要么变成带原因的 `Rejection`，不会静默消失。
+[`stock.py:115`](../src/quant/instruments/stock.py#L115)，由协议方法 [`StockRules.match`](../src/quant/instruments/stock.py#L98) 传入自己记的涨跌停基准后调用。每个订单要么变成 `Fill`，要么变成带原因的 `Rejection`，不会静默消失。
 
 ```mermaid
 flowchart TD
@@ -836,17 +851,17 @@ flowchart TD
 | 创业板，成交日 ≥ `chinext_reform_date`（2020-08-24） | `300` / `301` | 20% | 20%（与板块相同） |
 | 改革前的创业板、主板 | 其余 | 10% | 5% |
 
-涨跌停价（[`limit_price`](../src/quant/instruments/stock.py#L187)）用 `Decimal` 计算并四舍五入到分，避免 `9.5 × 1.1 = 10.450000000000001` 这类浮点误差让「开盘等于涨停价」判断失效。判断用 `≥` / `≤`，与「等于」等价（开盘价不会越过涨跌停价）。
+涨跌停价（[`limit_price`](../src/quant/instruments/stock.py#L197)）用 `Decimal` 计算并四舍五入到分，避免 `9.5 × 1.1 = 10.450000000000001` 这类浮点误差让「开盘等于涨停价」判断失效。判断用 `≥` / `≤`，与「等于」等价（开盘价不会越过涨跌停价）。
 
-**费用**（[`fee`](../src/quant/instruments/stock.py#L68)）：`max(成交额 × 佣金率, 最低佣金) + 成交额 × 过户费率`，卖出再加 `成交额 × 印花税率`；每一项先四舍五入到分再相加（情景 S02）。成交额按含滑点的成交价计算。印花税和过户费按成交日取费率：成交日早于 `stamp_duty_change_date`（2023-08-28）或 `transfer_fee_change_date`（2022-04-29）时，改用对应的 `*_before` 费率。写法与创业板涨跌幅的 `chinext_reform_date` 一致。
+**费用**（[`fee`](../src/quant/instruments/stock.py#L63)）：`max(成交额 × 佣金率, 最低佣金) + 成交额 × 过户费率`，卖出再加 `成交额 × 印花税率`；每一项先四舍五入到分再相加（情景 S02）。成交额按含滑点的成交价计算。印花税和过户费按成交日取费率：成交日早于 `stamp_duty_change_date`（2023-08-28）或 `transfer_fee_change_date`（2022-04-29）时，改用对应的 `*_before` 费率。写法与创业板涨跌幅的 `chinext_reform_date` 一致。
 
-**满仓买入的股数**（[`_max_affordable`](../src/quant/instruments/stock.py#L178)）：先取不计费用时能买的整手上限 `_round_lot(floor(cash / price))`，再逐手递减，直到 `成交额 + fee ≤ cash`。费用只在 `fee()` 一处计算，新增费用项不用改这里。
+**满仓买入的股数**（[`_max_affordable`](../src/quant/instruments/stock.py#L173)）：先取不计费用时能买的整手上限 `_round_lot(floor(cash / price))`，再逐手递减，直到 `成交额 + fee ≤ cash`。费用只在 `fee()` 一处计算，新增费用项不用改这里。
 
 例：现金 100,000、价格 10、只收万 2.5 佣金 → 上限 10,000 股需要 100,025，超出现金；退到 9,900 股，99,000 + 24.75 ≤ 100,000。见测试 [`test_full_position_buy_takes_as_many_whole_lots_as_cash_and_commission_allow`](../tests/test_engine.py#L96)。
 
 **T+1 的可卖数量**（[`Portfolio.sellable`](../src/quant/portfolio.py#L71)）：`Portfolio` 记住最近一个有买入成交的日期及当日各标的买入数量，可卖数量 = 持股 − 当日买入（查询日期不是那一天时，当日买入视为 0）。这样引擎不必每天通知账户「新的一天」。
 
-**除权**（[`before_open`](../src/quant/instruments/stock.py#L83) → [`apply_ex_rights`](../src/quant/instruments/stock.py#L91)）：后复权因子只在除权日跳变，`StockRules` 在开盘前发现因子变化就把 `ratio = 当日因子 / 前一日因子` 交给品种规则，它就是一股变成几股的比例（送转是真实的股数变化，现金分红则近似为按除权价再投资）。
+**除权**（[`before_open`](../src/quant/instruments/stock.py#L78) → [`apply_ex_rights`](../src/quant/instruments/stock.py#L86)）：后复权因子只在除权日跳变，`StockRules` 在开盘前发现因子变化就把 `ratio = 当日因子 / 前一日因子` 交给品种规则，它就是一股变成几股的比例（送转是真实的股数变化，现金分红则近似为按除权价再投资）。
 
 - 持股数 = `round(持股 × ratio)`，取最近的整股、不要求整手，由 [`Portfolio.adjust_position`](../src/quant/portfolio.py#L125) 写回，不产生成交、不动现金。例：每 10 股送 1 股，因子 1.0 → 1.1，1000 股 → 1100 股，不复权价 11 → 10，市值不变。
 - 除权参考价 = `前收盘价 / ratio`，四舍五入到分，写回 `StockRules._ref_price`，当日涨跌停以它为基准。例：前收盘 10、因子 1 → 2，参考价 5，主板涨停价 5.5（若仍按 10 算是 11，判断会偏松）。
@@ -1078,6 +1093,7 @@ flowchart LR
 backtest ma_cross --symbol sz.000001 --start 2018-01-01 --fast 10 --slow 60 --set cash_rate=0.02 --set stock.commission_rate=0.0003
 backtest roll_ic --hedge-threshold 0 --put-roll-days 3 --set option.vol_premium=1.2
 backtest roll_ic --no-hedge --roll-days 3 --set future.margin_rate=0.12
+dataqa --symbol sh.600519 --start 2016-01-01   # 数据质量报告，参数 --symbol / --start / --end / --notes / --cache-dir / --out
 ```
 
 | 参数 | 默认 | 说明 |
@@ -1095,7 +1111,7 @@ backtest roll_ic --no-hedge --roll-days 3 --set future.margin_rate=0.12
 | `--cache-dir` | `data_cache` | |
 | `--out` | `output` | |
 
-`--set` 的实现（[`_replace_path`](../src/quant/cli.py#L178)）是沿点号路径递归 `dataclasses.replace`：
+`--set` 的实现（[`_replace_path`](../src/quant/cli.py#L207)）是沿点号路径递归 `dataclasses.replace`：
 
 ```mermaid
 flowchart TD
@@ -1132,6 +1148,7 @@ flowchart LR
 - 测试中的策略都是几行的「脚本策略」（如 `BuyOnceOnFirstDay`、`BuyThenSellAll`、`test_stock_rules.py` 的 `Script`），按 `len(ctx.history(SYMBOL))` 或 `ctx.day` 决定哪天下单，让场景可手算；每个测试策略都要实现 `universe`。
 - 联网测试打 `@pytest.mark.network`，默认跳过，`pytest --run-network` 启用。
 - 例外：[`test_cache.py`](../tests/test_cache.py) 直接用假数据源驱动 `ParquetCache`，验证断点续拉——这是数据层自己的行为，经 `DataFeed` 观察不到。
+- 例外：[`test_dataqa.py`](../tests/test_dataqa.py) 直接用手工构造的规范化行情表测 `check_quality`——它检查的是数据本身，不经过引擎。
 - 例外：[`test_pricing.py`](../tests/test_pricing.py) 直接测 BS 模型价、delta、反推波动率和行权价网格——它们是对冲策略直接调用的公开纯函数。期权的成交、估值、到期结算仍经引擎测（`test_option_rules.py`），对冲逻辑经引擎 + `metrics.delta_table` / `return_breakdown` 测（`test_roll_ic_hedge.py`，期望的 delta 由测试按已知波动率独立算出）。
 
 现有测试覆盖的引擎语义：
@@ -1159,6 +1176,7 @@ flowchart LR
 | `test_pricing.py` 各测试 | 行权价网格各档；put 模型价满足无套利边界、与手算值一致、到期等于内在价值、零波动率等于远期内在价值；delta 在 −1 到 0 之间、平值接近 −0.5；由模型价反推回波动率 |
 | `test_roll_ic_hedge.py` 各测试 | 建仓买次月平值 put、净 delta 误差在一张以内；超过阈值才再平衡、阈值 0 每日再平衡；选出的 put 不变时只调张数、大幅波动后与到期月内再平衡时重选次月平值 put；put 到期前 5 个交易日换到新的次月平值合约；IC 展期当天 put 不动、净 delta 在阈值内；收益拆解之和等于总盈亏并分开贴水收敛与指数涨跌；分段指标连乘等于全区间；`daily.csv` 的净 delta 列 |
 | `test_futures_round_trip_is_judged_on_notional_including_multiplier` | 期货胜率与换手率按名义本金计 |
+| `test_dataqa.py` 各测试 | 干净数据无异常；每项检查各植入一处异常恰好报出；恰在涨停价不算越界、ST 5%；停牌日不查涨跌停与零成交量；送转股的除权参考价；重复的同值复权因子不算跳变；异常说明按 (代码, 日期, 检查项) 匹配 |
 | `test_interrupted_first_fetch_resumes_from_unfinished_month` | 首次按月拉取中断后从未完成的月份继续 |
 | `test_ic_data_smoke.py`（联网） | 中金所 IC 分合约 bar 带结算价、AKShare 中证 500 日线 |
 
@@ -1203,9 +1221,9 @@ sequenceDiagram
 4. **估值用不复权收盘价，基准用后复权价**：两者能对上，靠的是除权日按因子比例放大持股数。这是分红再投资的近似：不计红利税、取整到整股；且基准从首日收盘起算，策略要到次日开盘才买入、还剩不足整手的现金，所以净值与基准不会完全重合。
 5. **被拒的订单不顺延**：记一条 `Rejection` 后订单就结束了，不会挂到下一交易日再试。双均线只在交叉当天发信号，所以开盘涨停没买到的那次金叉就错过了，这符合「次日开盘一次性撮合」的设定。
 6. **卖出数量超过可卖数量时部分成交**：只卖出可卖部分，剩余部分不记 `Rejection`。买入不做部分成交，资金不够时整单拒绝。
-7. **涨跌停价以上一交易日不复权收盘价为基准，除权日改用除权参考价**：参考价由复权因子比例推算，不是交易所公布值，分红金额很小时可能差一分钱。新股上市初期不设涨跌幅、北交所 30% 等规则也没有建模。
+7. **涨跌停价以上一交易日不复权收盘价为基准，除权日改用除权参考价**：参考价由复权因子比例推算，不是交易所公布值，理论上可能差一分钱；`dataqa` 核对过 sh.600519 2016–2026 年的 15 个除权日，全部与交易所前收盘价一致到分（见 [§6.5](#65-数据质量检查dataqa)），其他标的用前先跑一次 `dataqa`。新股上市初期不设涨跌幅、北交所 30% 等规则也没有建模。
 8. **零股只在全部卖出时才能卖干净**：除权取整后持股常带零股（如 1012 股）。A 股要求零股一次性卖出，但按指定数量卖出时引擎不检查这条，可能留下零股；双均线总是全部卖出，不受影响。
-9. **成交价向不利方向取整到分**：[`_fill_price`](../src/quant/instruments/stock.py#L161) 把 `open × (1 ± 滑点)` 买入进位、卖出舍去到 0.01 元，再截断在涨跌停价以内（情景 S08）。所以只要滑点不为 0，成交价至少差 1 分，低价股上的实际滑点会高于 `slippage`（开盘 3.00 时约 0.33%）。
+9. **成交价向不利方向取整到分**：[`_fill_price`](../src/quant/instruments/stock.py#L156) 把 `open × (1 ± 滑点)` 买入进位、卖出舍去到 0.01 元，再截断在涨跌停价以内（情景 S08）。所以只要滑点不为 0，成交价至少差 1 分，低价股上的实际滑点会高于 `slippage`（开盘 3.00 时约 0.33%）。
 10. **`Context.history(symbol)` 每次调用复制一次**：双均线每天调用一次，复杂度 O(n²)，10 年约 2,500 个交易日，可以接受。
 11. **计息位置**：在交易日开头为上一段间隔计息，而 spec 写的是「当日末计息」。两者在净值上等价，只是周末利息记到下一交易日。
 12. **`buy_and_hold_nav` 被调用两次**：`compute_metrics` 内部一次（算指标），`cli` 里一次（画图和写 `daily.csv`），结果相同。

@@ -1,4 +1,4 @@
-"""命令行入口：backtest <策略名> [参数]。"""
+"""命令行入口：backtest <策略名> [参数]；dataqa [参数] 输出股票日线数据质量报告。"""
 
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ from typing import Any
 
 from quant.calendars import weekdays_after
 from quant.data.akshare_feed import load_etf_bars, load_index_bars
-from quant.data.baostock_feed import load_baostock_feed, load_trade_calendar
+from quant.data.baostock_feed import load_baostock_feed, load_quality_inputs, load_trade_calendar
 from quant.data.cffex_feed import load_cffex_bars
 from quant.data.feed import InMemoryDataFeed
+from quant.dataqa import action_table, annotate, check_quality, format_summary, load_notes
 from quant.engine import BacktestConfig, BacktestResult, run_backtest
 from quant.metrics import (basis_table, buy_and_hold_nav, compute_metrics, delta_table, return_breakdown,
                            split_metrics)
@@ -165,6 +166,34 @@ def load_roll_ic_feed(start: date, end: date, cache_dir: Path,
     projected = weekdays_after(
         last, last + timedelta(days=CALENDAR_LOOKAHEAD_DAYS))
     return InMemoryDataFeed(calendar=calendar + projected, bars=bars), last
+
+
+def dataqa_main(argv: list[str] | None = None) -> None:
+    """dataqa：股票日线数据质量报告。有未解释的异常时以退出码 1 结束。"""
+    parser = argparse.ArgumentParser(prog="dataqa", description="股票日线数据质量检查（学习路线阶段 1）")
+    parser.add_argument("--symbol", default="sh.600519")
+    parser.add_argument("--start", type=date.fromisoformat, default=date(2016, 1, 1))
+    parser.add_argument("--end", type=date.fromisoformat, default=date.today(), help="默认今天（最新）")
+    parser.add_argument("--notes", type=Path, default=Path("docs/data-quality/notes.csv"),
+                        help="异常说明文件（CSV：symbol,date,check,explanation）")
+    parser.add_argument("--cache-dir", type=Path, default=Path("data_cache"))
+    parser.add_argument("--out", type=Path, default=Path("output"))
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    inputs = load_quality_inputs(args.symbol, args.start, args.end, args.cache_dir)
+    table = annotate(check_quality(inputs), load_notes(args.notes))
+    actions = action_table(inputs)
+    summary = format_summary(args.symbol, inputs.daily, table, actions)
+    out_dir = args.out / f"dataqa_{args.symbol}_{args.start:%Y%m%d}_{args.end:%Y%m%d}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    table.to_csv(out_dir / "anomalies.csv", index=False, encoding="utf-8-sig")
+    actions.to_csv(out_dir / "actions.csv", index=False, encoding="utf-8-sig")
+    (out_dir / "summary.md").write_text(summary + "\n", encoding="utf-8")
+    print(summary)
+    print(f"\n报告已输出到 {out_dir}（summary.md、anomalies.csv、actions.csv）")
+    if (table["explanation"] == "").any():
+        raise SystemExit(1)
 
 
 def apply_overrides(config: BacktestConfig, overrides: list[str]) -> BacktestConfig:

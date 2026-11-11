@@ -1,0 +1,6 @@
+symbol,date,check,explanation
+sh.600519,2022-12-27,preclose_without_action,baostock 分红接口缺这条记录。公司公告临 2022-033：2022 年度回报股东特别分红，每股 21.91 元（含税），除息日 2022-12-27；1742.06 − 21.91 = 1720.15，与前收盘一致。https://www.moutaichina.com/eportal/fileDir/maotaigf/resource/cms/article/408428/548746/2022122109160148845.pdf
+sh.600519,2022-12-27,factor_without_action,同日 preclose_without_action：特别分红每股 21.91 元，baostock 复权因子已包含，只是分红接口缺记录；原型除权参考价 1720.15 与交易所一致，回测不受影响。
+sh.600519,2023-12-20,preclose_without_action,baostock 分红接口缺这条记录。公司公告临 2023-040：2023 年度回报股东特别分红，每股 19.106 元（含税），除息日 2023-12-20；1675.00 − 19.106 = 1655.894 → 1655.89，与前收盘一致。https://www.moutaichina.com/mtgf/attachDir/2023/12/2023122716424647784.pdf
+sh.600519,2023-12-20,factor_without_action,同日 preclose_without_action：特别分红每股 19.106 元，baostock 复权因子已包含，只是分红接口缺记录；原型除权参考价 1655.89 与交易所一致，回测不受影响。
+sh.600519,2025-06-26,ex_ref_mismatch,差异化分红（回购专用账户 3,310,085 股不参与分配）。公司公告临 2025-024：除权参考价按摊薄后的每股红利 27.600 元计算，1435.86 − 27.600 = 1408.26，与前收盘一致；本检查用的是实际派发的每股 27.673 元，因此差 0.07。实际持股者每股收到 27.673 元，原型按复权因子（对应 27.600）近似再投资，每股少计约 0.073 元，可忽略。http://static.cninfo.com.cn/finalpage/2025-06-20/1223934491.PDF

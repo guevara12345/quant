@@ -1,4 +1,5 @@
-"""baostock 适配器：A 股日线（不复权、后复权）、复权因子、停牌与 ST 状态、交易日历，经 Parquet 缓存后组装成 DataFeed。
+"""baostock 适配器：A 股日线（不复权、后复权）、复权因子、停牌与 ST 状态、交易日历，经 Parquet 缓存后组装成 DataFeed；
+另为数据质量检查组装前收盘价、成交量和分红送转（load_quality_inputs）。
 
 对 baostock 字段名和取值约定的依赖集中在本模块。
 """
@@ -16,8 +17,10 @@ import pandas as pd
 
 from quant.data.cache import ParquetCache
 from quant.data.feed import Bar, InMemoryDataFeed
+from quant.dataqa import DAILY_COLUMNS, QualityInputs
 
 K_FIELDS = "date,open,high,low,close,tradestatus,isST"
+K_QUALITY_FIELDS = "date,open,high,low,close,preclose,volume,tradestatus,isST"
 ADJUST_NONE = "3"  # baostock adjustflag：1 后复权，2 前复权，3 不复权
 ADJUST_BACKWARD = "1"
 
@@ -46,6 +49,28 @@ def load_baostock_feed(symbols: list[str], start: date, end: date, cache_dir: Pa
             bars[symbol] = _to_bars(unadjusted, backward_adjusted, factors)
     trading_days = calendar.loc[calendar["is_trading_day"], "date"].tolist()
     return InMemoryDataFeed(calendar=trading_days, bars=bars)
+
+
+def load_quality_inputs(symbol: str, start: date, end: date, cache_dir: Path) -> QualityInputs:
+    """数据质量检查的输入：不复权日线（含交易所前收盘价、成交量）、交易日历、复权因子、分红送转。
+
+    日线用单独的缓存键，字段比回测用的多，不影响已有的回测缓存。
+    """
+    cache = ParquetCache(cache_dir / "baostock")
+    with _session() as source:
+        calendar = cache.get("trade_dates", start, end, source.trade_dates)
+        daily = cache.get(f"k_{symbol}_quality", start, end, partial(source.k_data_quality, symbol))
+        factors = cache.get(f"adjust_factor_{symbol}", date(
+            1990, 1, 1), end, partial(source.adjust_factor, symbol))
+        actions = cache.get(f"dividend_{symbol}", start, end, partial(source.dividends, symbol))
+    actions = actions.reindex(columns=["date", "cash", "shares"])
+    return QualityInputs(
+        symbol=symbol,
+        calendar=calendar.loc[calendar["is_trading_day"], "date"].tolist(),
+        daily=daily.reindex(columns=DAILY_COLUMNS),
+        factors=factors,
+        actions=actions,
+    )
 
 
 def _to_bars(unadjusted: pd.DataFrame, backward_adjusted: pd.DataFrame, factors: pd.DataFrame) -> dict[date, Bar]:
@@ -94,6 +119,33 @@ class _BaostockSource:
         out["suspended"] = df["tradestatus"] == "0"
         out["is_st"] = df["isST"] == "1"
         return out
+
+    def k_data_quality(self, symbol: str, start: date, end: date) -> pd.DataFrame:
+        """不复权日线，另含交易所公布的前收盘价（除权日为除权参考价）和成交量（股）。"""
+        df = self._query("query_history_k_data_plus", code=symbol, fields=K_QUALITY_FIELDS,
+                         start_date=start.isoformat(), end_date=end.isoformat(),
+                         frequency="d", adjustflag=ADJUST_NONE)
+        out = pd.DataFrame({"date": pd.to_datetime(df["date"]).dt.date})
+        for col in ["open", "high", "low", "close", "preclose", "volume"]:
+            out[col] = pd.to_numeric(df[col], errors="coerce")
+        out["suspended"] = df["tradestatus"] == "0"
+        out["is_st"] = df["isST"] == "1"
+        return out
+
+    def dividends(self, symbol: str, start: date, end: date) -> pd.DataFrame:
+        """[start, end] 内除权除息日的分红送转：每股税前现金红利、每股送股加转增股。"""
+        frames = [self._query("query_dividend_data", code=symbol, year=str(year), yearType="operate")
+                  for year in range(start.year, end.year + 1)]
+        df = pd.concat(frames) if frames else pd.DataFrame()
+        if df.empty:
+            return pd.DataFrame(columns=["date", "cash", "shares"])
+        # 预案阶段尚未实施的记录没有除权除息日，丢弃
+        out = pd.DataFrame({"date": pd.to_datetime(df["dividOperateDate"], errors="coerce").dt.date})
+        out["cash"] = pd.to_numeric(df["dividCashPsBeforeTax"], errors="coerce").fillna(0.0).to_numpy()
+        out["shares"] = (pd.to_numeric(df["dividStocksPs"], errors="coerce").fillna(0.0)
+                         + pd.to_numeric(df["dividReserveToStockPs"], errors="coerce").fillna(0.0)).to_numpy()
+        out = out.dropna(subset=["date"])
+        return out[(out["date"] >= start) & (out["date"] <= end)].reset_index(drop=True)
 
     def adjust_factor(self, symbol: str, start: date, end: date) -> pd.DataFrame:
         df = self._query("query_adjust_factor", code=symbol,
