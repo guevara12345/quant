@@ -66,7 +66,8 @@ class StockRules:
             return 0.0
         c = self.config
         transfer_rate = c.transfer_fee_rate if day >= c.transfer_fee_change_date else c.transfer_fee_rate_before
-        items = [max(amount * c.commission_rate, c.min_commission), amount * transfer_rate]
+        items = [max(amount * c.commission_rate, c.min_commission),
+                 amount * transfer_rate]
         if side is Side.SELL:
             stamp_rate = c.stamp_duty_rate if day >= c.stamp_duty_change_date else c.stamp_duty_rate_before
             items.append(amount * stamp_rate)
@@ -125,7 +126,8 @@ class StockRules:
         limit_up = limit_down = None
         if prev_close is not None:
             ratio = self.limit_ratio(order.symbol, day, bar.is_st)
-            limit_up, limit_down = limit_price(prev_close, 1 + ratio), limit_price(prev_close, 1 - ratio)
+            limit_up, limit_down = limit_price(
+                prev_close, 1 + ratio), limit_price(prev_close, 1 - ratio)
             if order.side is Side.BUY and bar.open >= limit_up:
                 return reject(RejectReason.LIMIT_UP)
             if order.side is Side.SELL and bar.open <= limit_down:
@@ -158,7 +160,8 @@ class StockRules:
     ) -> float:
         """开盘价加不利滑点，向不利方向取整到 0.01 元（买入进位、卖出舍去），再截断在涨跌停价以内。"""
         sign = 1 if side is Side.BUY else -1
-        raw = Decimal(str(open_price)) * (1 + sign * Decimal(str(self.config.slippage)))
+        raw = Decimal(str(open_price)) * (1 + sign *
+                                          Decimal(str(self.config.slippage)))
         rounding = ROUND_CEILING if side is Side.BUY else ROUND_FLOOR
         price = float(raw.quantize(Decimal("0.01"), rounding=rounding))
         if side is Side.BUY and limit_up is not None:

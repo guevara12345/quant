@@ -82,7 +82,8 @@ def run_ma_cross(args: argparse.Namespace, config: BacktestConfig,
         result, feed, args.symbol, risk_free_rate=config.cash_rate)
     benchmark = buy_and_hold_nav(feed, args.symbol, list(
         result.daily["date"]), config.initial_cash)
-    out_dir = args.out / f"{args.strategy}_{args.symbol}_{args.start:%Y%m%d}_{args.end:%Y%m%d}"
+    out_dir = args.out / \
+        f"{args.strategy}_{args.symbol}_{args.start:%Y%m%d}_{args.end:%Y%m%d}"
     title = (f"{args.strategy} MA{args.fast}/MA{args.slow} {args.symbol} "
              f"{args.start} ~ {result.daily['date'].iloc[-1]}")
     write_report(out_dir, title, result, benchmark, metrics)
@@ -97,7 +98,8 @@ def run_roll_ic(args: argparse.Namespace, config: BacktestConfig,
     hedge = None if args.no_hedge else PutHedge(
         option=config.option, threshold=args.hedge_threshold, roll_days=args.put_roll_days, underlying=ETF500)
     lookback = None if hedge is None else config.option.vol_lookback_days
-    feed, end = load_roll_ic_feed(args.start, args.end, args.cache_dir, etf_lookback_days=lookback)
+    feed, end = load_roll_ic_feed(
+        args.start, args.end, args.cache_dir, etf_lookback_days=lookback)
     multiplier = config.future.multiplier
     unhedged = run_backtest(feed, RollIC(roll_days=args.roll_days, multiplier=multiplier),
                             start=args.start, end=end, config=config)
@@ -105,7 +107,8 @@ def run_roll_ic(args: argparse.Namespace, config: BacktestConfig,
         parser.error(f"{args.start} 至 {args.end} 区间内没有交易日")
     days = list(unhedged.daily["date"])
     benchmark = buy_and_hold_nav(feed, CSI500, days, config.initial_cash)
-    breakdowns = {"纯滚 IC": return_breakdown(unhedged, feed, CSI500, config.initial_cash, multiplier)}
+    breakdowns = {"纯滚 IC": return_breakdown(
+        unhedged, feed, CSI500, config.initial_cash, multiplier)}
     period = f"{args.start:%Y%m%d}_{args.end:%Y%m%d}"
     span = f"{args.start} ~ {days[-1]}"
     comparisons = None
@@ -129,11 +132,13 @@ def run_roll_ic(args: argparse.Namespace, config: BacktestConfig,
         title = (f"{args.strategy} 滚 IC + put delta 中性（展期 {args.roll_days} 日，"
                  f"阈值 {args.hedge_threshold:.0%}）{span}\n{MODEL_PRICE_NOTE}")
 
-    metrics = compute_metrics(result, feed, CSI500, risk_free_rate=config.cash_rate)
+    metrics = compute_metrics(result, feed, CSI500,
+                              risk_free_rate=config.cash_rate)
     metrics["breakdown"] = breakdowns
     if hedge is not None:
         metrics["note"] = f"{MODEL_PRICE_NOTE}；500ETF 期权 {ETF_OPTION_LISTING} 上市，此前的 put 是假设品种"
-        metrics["segments"] = split_metrics(result, feed, CSI500, ETF_OPTION_LISTING, config.cash_rate)
+        metrics["segments"] = split_metrics(
+            result, feed, CSI500, ETF_OPTION_LISTING, config.cash_rate)
     write_report(out_dir, title, result, benchmark, metrics,
                  extra_daily=extra_daily, labels=labels, comparisons=comparisons)
 
@@ -170,10 +175,13 @@ def load_roll_ic_feed(start: date, end: date, cache_dir: Path,
 
 def dataqa_main(argv: list[str] | None = None) -> None:
     """dataqa：股票日线数据质量报告。有未解释的异常时以退出码 1 结束。"""
-    parser = argparse.ArgumentParser(prog="dataqa", description="股票日线数据质量检查（学习路线阶段 1）")
+    parser = argparse.ArgumentParser(
+        prog="dataqa", description="股票日线数据质量检查（学习路线阶段 1）")
     parser.add_argument("--symbol", default="sh.600519")
-    parser.add_argument("--start", type=date.fromisoformat, default=date(2016, 1, 1))
-    parser.add_argument("--end", type=date.fromisoformat, default=date.today(), help="默认今天（最新）")
+    parser.add_argument("--start", type=date.fromisoformat,
+                        default=date(2016, 1, 1))
+    parser.add_argument("--end", type=date.fromisoformat,
+                        default=date.today(), help="默认今天（最新）")
     parser.add_argument("--notes", type=Path, default=Path("docs/data-quality/notes.csv"),
                         help="异常说明文件（CSV：symbol,date,check,explanation）")
     parser.add_argument("--cache-dir", type=Path, default=Path("data_cache"))
@@ -181,11 +189,13 @@ def dataqa_main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    inputs = load_quality_inputs(args.symbol, args.start, args.end, args.cache_dir)
+    inputs = load_quality_inputs(
+        args.symbol, args.start, args.end, args.cache_dir)
     table = annotate(check_quality(inputs), load_notes(args.notes))
     actions = action_table(inputs)
     summary = format_summary(args.symbol, inputs.daily, table, actions)
-    out_dir = args.out / f"dataqa_{args.symbol}_{args.start:%Y%m%d}_{args.end:%Y%m%d}"
+    out_dir = args.out / \
+        f"dataqa_{args.symbol}_{args.start:%Y%m%d}_{args.end:%Y%m%d}"
     out_dir.mkdir(parents=True, exist_ok=True)
     table.to_csv(out_dir / "anomalies.csv", index=False, encoding="utf-8-sig")
     actions.to_csv(out_dir / "actions.csv", index=False, encoding="utf-8-sig")
