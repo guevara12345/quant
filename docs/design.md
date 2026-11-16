@@ -90,7 +90,7 @@ flowchart TD
     FR --> PF
     OR --> PF
     Engine <--> STR["策略<br/>ma_cross / roll_ic"]
-    Engine --> RES["BacktestResult<br/>daily + fills + rejections"]
+    Engine --> RES["BacktestResult<br/>daily + fills + rejections + alerts"]
     RES --> MET[metrics] --> REP[report]
     RES --> REP
 ```
@@ -122,6 +122,7 @@ classDiagram
         +date date
         +str symbol
         +Side side
+        +int|None quantity
         +RejectReason reason
     }
     class RejectReason {
@@ -133,6 +134,7 @@ classDiagram
         INSUFFICIENT_CASH 资金不足
         ODD_LOT 不足整手
         NO_POSITION 无持仓
+        NO_QUOTE 无行情
     }
     Rejection --> RejectReason
 
@@ -140,7 +142,7 @@ classDiagram
         +float cash
         +dict~str, int~ positions
         +sellable(symbol, day) int  T+1：持股 − 当日买入
-        +float margin  保证金占用（只记录，04）
+        +dict~str, float~ margins  保证金占用（只记录，04）
     }
 
     class BacktestConfig {
