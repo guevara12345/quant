@@ -92,7 +92,8 @@ class Portfolio:
             self.marks[fill.symbol] = (
                 held * mark + fill.quantity * fill.price) / (held + fill.quantity)
         else:
-            self.cash += fill.quantity * fill.multiplier * (fill.price - self.marks[fill.symbol])
+            self.cash += fill.quantity * fill.multiplier * \
+                (fill.price - self.marks[fill.symbol])
         self.cash -= fill.fee
         self._update_position(fill)
         if fill.symbol not in self.positions:
@@ -113,7 +114,8 @@ class Portfolio:
             quantity = self.positions.get(fill.symbol, 0) + fill.quantity
         else:
             # 先平昨仓、后平今仓：超出昨仓的部分从当日买入中扣除（股票受 T+1 约束，不会走到这里）
-            closed_today = fill.quantity - max(self.sellable(fill.symbol, fill.date), 0)
+            closed_today = fill.quantity - \
+                max(self.sellable(fill.symbol, fill.date), 0)
             if closed_today > 0:
                 self._bought_today[fill.symbol] -= closed_today
             quantity = self.positions.get(fill.symbol, 0) - fill.quantity
@@ -131,6 +133,7 @@ class Portfolio:
 
     def accrue_interest(self, annual_rate: float, days: int) -> float:
         """闲置现金（扣除保证金占用的部分）按年化利率、自然日数计息，返回利息。"""
-        interest = (self.cash - sum(self.margins.values())) * annual_rate * days / 365
+        interest = (self.cash - sum(self.margins.values())) * \
+            annual_rate * days / 365
         self.cash += interest
         return interest

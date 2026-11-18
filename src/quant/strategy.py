@@ -44,7 +44,8 @@ class Context:
     bars: dict[str, Bar]
     _history: dict[str, list[tuple[date, Bar]]] = field(repr=False)
     _trading_days: Callable[[date, date], list[date]] = field(repr=False)
-    _quote: Callable[[str], Bar | None] = field(default=lambda symbol: None, repr=False)
+    _quote: Callable[[str], Bar | None] = field(
+        default=lambda symbol: None, repr=False)
 
     def bar(self, symbol: str) -> Bar | None:
         return self.bars[symbol] if symbol in self.bars else self._quote(symbol)
